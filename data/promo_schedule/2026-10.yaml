@@ -1,0 +1,121 @@
+# 2026年10月 販促スケジュール(記入例)
+# --------------------------------------------------------------------------
+# 毎月、事前共有される販促スケジュールをこの形式に書き写して使う。
+#
+# traffic_multiplier : エントリーしてもしなくても得られる需要増(モール全体の集客増)
+# entry_uplift       : エントリーして初めて得られる上乗せ
+#                      (特集面掲載 + 「ボーナスストア対象」絞り込み + 還元率表示によるCVR改善)
+#                      reference_rate(既定4%)でエントリーした場合の注文増加率で書く
+#
+# この2つを分けているのが肝。エントリー必須イベントでエントリーしないと
+# entry_uplift 分がまるごと機会損失になる。
+#
+# 係数は `calibrate` が出力する「イベント別の推定値」で上書きしていくこと。
+
+month: "2026-10"
+source_note: "モール公式 月次販促スケジュール(事前共有分)"
+
+# entry_deadline を書かなかったイベントの既定締切(開催初日の何日前か)
+entry_deadline_days_before: 3
+
+events:
+  # ------------------------------------------------------------------
+  - id: premium_sunday_1
+    name: "プレミアムな日曜日"
+    dates: ["2026-10-04"]
+    entry_required: true
+    entry_deadline: "2026-10-01"
+    traffic_multiplier: 1.35
+    entry_uplift: 0.38
+    aov_multiplier: 1.05
+    min_bonus_rate: 0.01
+    priority: 3
+    note: "LYPプレミアム会員向け。会員比率が高く高単価商材と相性が良い"
+
+  - id: five_day_05
+    name: "5のつく日"
+    dates: ["2026-10-05"]
+    entry_required: true
+    traffic_multiplier: 1.55
+    entry_uplift: 0.42
+    min_bonus_rate: 0.01
+    priority: 4
+
+  - id: thanks_day
+    name: "Yahoo!ショッピング感謝デー"
+    dates: ["2026-10-08"]
+    entry_required: true
+    traffic_multiplier: 1.40
+    entry_uplift: 0.36
+    min_bonus_rate: 0.01
+    priority: 3
+
+  - id: bakugai_week
+    name: "爆買いWEEK"
+    dates: []
+    period: ["2026-10-12", "2026-10-16"]
+    entry_required: true
+    entry_unit: period          # 期間一括エントリー(途中離脱不可)
+    entry_deadline: "2026-10-07"
+    traffic_multiplier: 1.30
+    entry_uplift: 0.30
+    aov_multiplier: 1.08
+    min_bonus_rate: 0.02
+    priority: 4
+    note: "まとめ買い需要。本体+消耗品のセット訴求が効く"
+
+  - id: five_day_15
+    name: "5のつく日"
+    dates: ["2026-10-15"]
+    entry_required: true
+    traffic_multiplier: 1.55
+    entry_uplift: 0.42
+    min_bonus_rate: 0.01
+    priority: 4
+    note: "爆買いWEEK期間と重複(効果は逓減して合算される)"
+
+  - id: premium_sunday_2
+    name: "プレミアムな日曜日"
+    dates: ["2026-10-18"]
+    entry_required: true
+    entry_deadline: "2026-10-15"
+    traffic_multiplier: 1.35
+    entry_uplift: 0.38
+    aov_multiplier: 1.05
+    min_bonus_rate: 0.01
+    priority: 3
+
+  - id: chou_paypay_matsuri
+    name: "超PayPay祭"
+    dates: []
+    period: ["2026-10-20", "2026-10-25"]
+    entry_required: true
+    entry_unit: period          # 期間一括エントリー
+    entry_deadline: "2026-10-13"
+    traffic_multiplier: 1.60
+    entry_uplift: 0.55
+    aov_multiplier: 1.10
+    min_bonus_rate: 0.02
+    allowed_rates: [0.02, 0.03, 0.04, 0.05]
+    priority: 5
+    note: "年間最大級。最終日はグランドフィナーレで需要がさらに跳ねる"
+
+  - id: five_day_25
+    name: "5のつく日"
+    dates: ["2026-10-25"]
+    entry_required: true
+    traffic_multiplier: 1.55
+    entry_uplift: 0.42
+    min_bonus_rate: 0.01
+    priority: 4
+    note: "日曜 × 5のつく日 × 超PayPay祭グランドフィナーレの三重重複"
+
+  - id: grand_finale
+    name: "超PayPay祭グランドフィナーレ"
+    dates: ["2026-10-25"]
+    entry_required: true
+    traffic_multiplier: 1.45
+    entry_uplift: 0.40
+    aov_multiplier: 1.10
+    min_bonus_rate: 0.02
+    priority: 5
