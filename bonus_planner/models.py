@@ -1,51 +1,118 @@
-"""ドメインモデル定義."""
+"""ドメインモデル定義.
+
+設計の中核は「顧客が受け取る付与率」と「自社が負担する原資」の分離。
+
+    顧客体感の総付与率(d) = その日有効な全施策の率の合計   ← 需要のドライバー
+    自社ポイント原資(d)   = funding=store の施策のみ × GMV  ← コスト
+
+モール負担の施策は需要を押し上げるがコストにはならない。両者を混ぜると、
+モール負担分まで自社原資として計上して原資が数倍に膨らむ。
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Iterable
 
+# 参加資格。施策ごとに「どの条件を満たすストアが対象か」を表す。
+ELIGIBILITY_ALL = "all"                     # 全ストア(エントリー不要)
+ELIGIBILITY_PROMO_PACKAGE = "promo_package"  # プロモーションパッケージ加入ストア
+ELIGIBILITY_BSPLUS = "bonus_store_plus"      # ボーナスストアPlus参加ストア
+ELIGIBILITY_BSPLUS_EXCELLENT = "bonus_store_plus_excellent"  # 参加かつ優良ストア
+ELIGIBILITIES = (
+    ELIGIBILITY_ALL,
+    ELIGIBILITY_PROMO_PACKAGE,
+    ELIGIBILITY_BSPLUS,
+    ELIGIBILITY_BSPLUS_EXCELLENT,
+)
 
-# --------------------------------------------------------------------------
-# 販促スケジュール
-# --------------------------------------------------------------------------
+FUNDING_MALL = "mall"    # モール負担 — 需要は押し上げるが自社コストにならない
+FUNDING_STORE = "store"  # 自社負担 — ポイント原資として計上する
+FUNDINGS = (FUNDING_MALL, FUNDING_STORE)
+
+CAP_PERIODS = ("day", "month", "period")
+
+
 @dataclass(frozen=True)
-class PromoEvent:
-    """モール側の販促イベント1件.
+class Participation:
+    """ストアの参加状態.
 
-    traffic_multiplier と entry_uplift の役割分担がこのシステムの肝。
-
-    traffic_multiplier
-        エントリー有無に関わらず得られるモール全体の需要増。
-        (イベント告知によるモール来訪増 → 自社商品にも流入する分)
-    entry_uplift
-        エントリーして初めて得られる上乗せ。
-        ボーナスストア特集面への掲載、「ボーナスストア対象」絞り込み検索での
-        露出、還元率表示によるCVR改善の合計。
-        参照還元率(reference_rate)でこの値、還元率が変われば逓減反応で調整。
-
-    「プレミアムな日曜日」「感謝デー」「超PayPay祭」「爆買いWEEK」のように
-    エントリーが参加条件になっているイベントは entry_required=True とし、
-    エントリーしない場合は entry_uplift 分がまるごと機会損失になる。
+    promo_package と excellent_store は月単位で決まる前提条件。
+    bonus_store_plus だけが日ごとに選べる意思決定変数。
     """
+
+    promo_package: bool = False
+    excellent_store: bool = False
+    bonus_store_plus: bool = False
+
+    def with_bsplus(self, joined: bool) -> "Participation":
+        return Participation(self.promo_package, self.excellent_store, joined)
+
+
+@dataclass(frozen=True)
+class Benefit:
+    """販促カレンダー1行 ＝ ある期間に有効な1つの特典."""
 
     id: str
     name: str
-    dates: tuple[date, ...]
-    entry_required: bool = True
-    entry_unit: str = "day"  # "day" = 日単位 / "period" = 期間一括エントリー
+    days: tuple[date, ...]
+    rate: float = 0.0                 # 付与率。買い回り型は tiers を使う
+    coupon_yen: float = 0.0           # 定額値引き(モールクーポン等)
+    funding: str = FUNDING_MALL
+    eligibility: str = ELIGIBILITY_ALL
+    min_order_yen: float = 0.0        # 注文下限金額
+    user_cap_yen: float | None = None  # ユーザー側の付与上限(円相当)
+    user_cap_period: str = "day"
+    tiers: tuple[tuple[float, float], ...] = ()  # (合計注文金額の下限, 付与率)
+    traffic_multiplier: float = 1.0   # 付与率とは別のモール集客増(広告出稿など)
+    entry_unit: str = "day"           # day | period(期間一括エントリー)
     entry_deadline: date | None = None
-    traffic_multiplier: float = 1.0
-    entry_uplift: float = 0.0
-    aov_multiplier: float = 1.0
-    min_bonus_rate: float = 0.0
-    allowed_rates: tuple[float, ...] = ()
-    priority: int = 0  # 表示順・同点時の優先度(大きいほど重要)
     note: str = ""
 
     def covers(self, day: date) -> bool:
-        return day in self.dates
+        return day in self.days
+
+    @property
+    def requires_entry(self) -> bool:
+        """エントリー(ボーナスストアPlus参加)が必要か."""
+        return self.eligibility in (ELIGIBILITY_BSPLUS, ELIGIBILITY_BSPLUS_EXCELLENT)
+
+    @property
+    def requires_promo_package(self) -> bool:
+        return self.eligibility == ELIGIBILITY_PROMO_PACKAGE
+
+    def is_active(self, part: Participation) -> bool:
+        """この参加状態でこの特典が有効か."""
+        if self.eligibility == ELIGIBILITY_ALL:
+            return True
+        if self.eligibility == ELIGIBILITY_PROMO_PACKAGE:
+            return part.promo_package
+        if self.eligibility == ELIGIBILITY_BSPLUS:
+            return part.bonus_store_plus
+        if self.eligibility == ELIGIBILITY_BSPLUS_EXCELLENT:
+            return part.bonus_store_plus and part.excellent_store
+        raise ValueError(f"未知の eligibility: {self.eligibility}")
+
+    def rate_for_basket(self, basket_yen: float) -> float:
+        """注文金額に応じた付与率. tiers があれば該当する最上位の段を返す."""
+        if self.tiers:
+            applicable = [r for threshold, r in self.tiers if basket_yen >= threshold]
+            return max(applicable) if applicable else 0.0
+        return self.rate
+
+
+@dataclass(frozen=True)
+class ScheduleNote:
+    """付与率で表せない施策や運用上の注意.
+
+    「ボーナスストアPlusのお買い物で引けるくじ」のように当選確率が公開されず
+    期待値を置けないもの、「事前のユーザー訴求NG」のような制約を持つ。
+    需要モデルには入れず、レポートに注意事項として出す。
+    """
+
+    text: str
+    days: tuple[date, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -55,18 +122,31 @@ class PromoSchedule:
     month: str  # "YYYY-MM"
     first_day: date
     last_day: date
-    events: tuple[PromoEvent, ...]
+    benefits: tuple[Benefit, ...]
+    extends_to: date | None = None  # 月を跨ぐ施策の最終日(爆買WEEKの11/1など)
     source_note: str = ""
+    notes: tuple[ScheduleNote, ...] = ()
+
+    @property
+    def planning_last_day(self) -> date:
+        """計画対象の最終日. 月跨ぎ施策があればそこまで伸ばす."""
+        if self.extends_to and self.extends_to > self.last_day:
+            return self.extends_to
+        return self.last_day
 
     def days(self) -> list[date]:
         out, d = [], self.first_day
-        while d <= self.last_day:
+        last = self.planning_last_day
+        while d <= last:
             out.append(d)
-            d = date.fromordinal(d.toordinal() + 1)
+            d += timedelta(days=1)
         return out
 
-    def events_on(self, day: date) -> list[PromoEvent]:
-        return [e for e in self.events if e.covers(day)]
+    def benefits_on(self, day: date) -> list[Benefit]:
+        return [b for b in self.benefits if b.covers(day)]
+
+    def active_on(self, day: date, part: Participation) -> list[Benefit]:
+        return [b for b in self.benefits_on(day) if b.is_active(part)]
 
 
 # --------------------------------------------------------------------------
@@ -77,39 +157,49 @@ class DayContext:
     """需要モデルに渡す1日分の文脈."""
 
     day: date
-    events: list[PromoEvent] = field(default_factory=list)
-    is_five_day: bool = False       # 5のつく日
-    is_zorome: bool = False         # ゾロ目の日
-    is_payday_window: bool = False  # 給料日直後
-    weekday: int = 0                # 0=月 .. 6=日
+    benefits: list[Benefit] = field(default_factory=list)
+    is_five_day: bool = False
+    is_zorome: bool = False
+    is_payday_window: bool = False
+    weekday: int = 0
 
     @property
-    def event_names(self) -> list[str]:
-        return [e.name for e in self.events]
+    def benefit_names(self) -> list[str]:
+        seen, out = set(), []
+        for b in self.benefits:
+            if b.name not in seen:
+                seen.add(b.name)
+                out.append(b.name)
+        return out
 
 
 @dataclass
 class DayEstimate:
-    """ある日・ある還元率での見積り.
+    """ある日・ある自社設定還元率での見積り.
 
-    「エントリーしない場合」を基準線(base)とし、その差分で評価する。
-    ポイント原資は自然発生分の注文にも等しく乗るため、コストは
-    エントリー時の全GMVにかかる点に注意(=カニバリを織り込む)。
+    基準線(base)は「ボーナスストアPlusに参加しない場合」。
+    参加しても常時施策とプロモパッケージ施策は効いているため、
+    基準線はゼロではない点に注意。
     """
 
     day: date
-    bonus_rate: float
+    store_rate: float          # 自社が設定した還元率(自社負担)
+    base_total_rate: float     # 不参加時に顧客が受け取る総付与率
+    entry_total_rate: float    # 参加時に顧客が受け取る総付与率
+    unlocked_mall_rate: float  # 参加で開いたモール負担分
     base_orders: float
     base_gmv: float
     entry_orders: float
     entry_gmv: float
-    effective_rate: float  # ポイント上限適用後の実効還元率
-    point_cost: float
+    effective_store_rate: float  # 1注文あたり上限適用後の自社実効還元率
+    base_point_cost: float       # 不参加でも発生する自社原資(ストアポイント等)
+    entry_point_cost: float      # 参加時の自社原資の総額
+    point_cost: float            # 上記の差分 = エントリー判断で増える原資
     incremental_gmv: float
     incremental_orders: float
-    gross_profit_delta: float  # 粗利増 - ポイント原資(LTV除く)
+    gross_profit_delta: float
     ltv_value: float
-    net_value: float  # gross_profit_delta + ltv_value
+    net_value: float
     roas: float
     uplift_ratio: float
 
@@ -120,25 +210,33 @@ class DayEstimate:
 
 @dataclass
 class EntryOption:
-    """エントリー単位に対する1つの選択肢(=還元率)."""
+    """エントリー単位に対する1つの選択肢(=自社設定還元率)."""
 
-    bonus_rate: float
+    store_rate: float
     cost: float
-    value: float
+    net_value: float
     incremental_gmv: float
     estimates: list[DayEstimate]
 
     @property
     def roas(self) -> float:
-        return self.incremental_gmv / self.cost if self.cost > 0 else 0.0
+        return self.incremental_gmv / self.cost if self.cost > 0 else float("inf")
+
+    def objective_value(self, objective: str) -> float:
+        """最適化の目的関数値."""
+        if objective == "gmv":
+            return self.incremental_gmv
+        if objective == "profit":
+            return self.net_value
+        raise ValueError(f"未知の objective: {objective}")
 
 
 @dataclass
 class EntryUnit:
     """エントリー申込の最小単位.
 
-    日単位イベント/平常日は1日=1ユニット。
-    超PayPay祭のような期間一括エントリーは期間全体で1ユニット(all-or-nothing)。
+    日単位は1日=1ユニット。期間一括エントリー(爆買WEEKなど)は期間全体で
+    1ユニットとして採否を決める(all-or-nothing)。
     """
 
     key: str
@@ -146,9 +244,9 @@ class EntryUnit:
     days: list[date]
     options: list[EntryOption]
     entry_deadline: date | None = None
-    entry_required_events: list[str] = field(default_factory=list)
-    mandatory: bool = False  # 経営判断で必ずエントリーする(予算から先取り)
-    blocked_reason: str | None = None  # 締切超過などで選択不可
+    entry_required_benefits: list[str] = field(default_factory=list)
+    mandatory: bool = False
+    blocked_reason: str | None = None
 
     @property
     def selectable(self) -> bool:
@@ -161,13 +259,15 @@ class PlanResult:
 
     month: str
     generated_for: date
+    objective: str
+    participation: Participation
     selected: list[tuple[EntryUnit, EntryOption]]
     rejected: list[tuple[EntryUnit, EntryOption, str]]
     blocked: list[EntryUnit]
     budget: float
     total_cost: float
     total_incremental_gmv: float
-    total_value: float
+    total_net_value: float
     baseline_gmv: float
 
     @property
@@ -187,14 +287,21 @@ class PlanResult:
     def rate_for(self, day: date) -> float | None:
         for unit, opt in self.selected:
             if day in unit.days:
-                return opt.bonus_rate
+                return opt.store_rate
+        return None
+
+    def estimate_for(self, day: date) -> DayEstimate | None:
+        for unit, opt in self.selected:
+            for est in opt.estimates:
+                if est.day == day:
+                    return est
         return None
 
 
-def dedupe_events(events: Iterable[PromoEvent]) -> list[PromoEvent]:
+def dedupe(benefits: Iterable[Benefit]) -> list[Benefit]:
     seen, out = set(), []
-    for e in events:
-        if e.id not in seen:
-            seen.add(e.id)
-            out.append(e)
+    for b in benefits:
+        if b.id not in seen:
+            seen.add(b.id)
+            out.append(b)
     return out

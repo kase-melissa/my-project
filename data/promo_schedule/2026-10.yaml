@@ -1,121 +1,181 @@
-# 2026年10月 販促スケジュール(記入例)
+# 2026年10月 販促イベントカレンダー(貴社内限定)
 # --------------------------------------------------------------------------
-# 毎月、事前共有される販促スケジュールをこの形式に書き写して使う。
+# 出典: モール公式 販促イベントカレンダー PDF (事前共有分) より転記
 #
-# traffic_multiplier : エントリーしてもしなくても得られる需要増(モール全体の集客増)
-# entry_uplift       : エントリーして初めて得られる上乗せ
-#                      (特集面掲載 + 「ボーナスストア対象」絞り込み + 還元率表示によるCVR改善)
-#                      reference_rate(既定4%)でエントリーした場合の注文増加率で書く
+# 転記の検証: 各施策の付与率を積み上げた値が、PDF最下段の「最大付与率」行
+# (ボーナスストアPlus参加かつ優良ストア前提) と全32日で一致することを
+# tests/test_schedule_2026_10.py で検証している。
 #
-# この2つを分けているのが肝。エントリー必須イベントでエントリーしないと
-# entry_uplift 分がまるごと機会損失になる。
+# 用語:
+#   funding      mall  = モール負担(需要は押し上げるが自社コストにならない)
+#                store = 自社負担(ポイント原資として計上する)
+#   eligibility  all                        = 全ストア(エントリー不要)
+#                promo_package              = プロモーションパッケージ加入ストア
+#                bonus_store_plus           = ボーナスストアPlus参加ストア
+#                bonus_store_plus_excellent = 参加かつ優良ストア
 #
-# 係数は `calibrate` が出力する「イベント別の推定値」で上書きしていくこと。
+# traffic_multiplier は「付与率とは別に働くモール集客増」。
+# 付与率の効果は需要モデルが総付与率から計算するため、ここで倍率を入れると
+# 二重計上になる。広告出稿など別要因が確認できた施策にだけ入れること。
+# 現時点では全施策 1.0(未設定)。
 
 month: "2026-10"
-source_note: "モール公式 月次販促スケジュール(事前共有分)"
+extends_to: "2026-11-01"   # 爆買WEEKが11/1まで続くため計画対象を延長
+source_note: "モール公式 販促イベントカレンダー(2026年10月・貴社内限定)"
+entry_deadline_days_before: 3   # 締切の記載がPDFにないための暫定値
 
-# entry_deadline を書かなかったイベントの既定締切(開催初日の何日前か)
-entry_deadline_days_before: 3
+benefits:
+  # ======================================================================
+  # 定常施策 — 毎日・全ストア・エントリー不要 (合計7%)
+  # ======================================================================
+  - id: store_point
+    name: "ストアポイント"
+    days: all
+    rate: 0.01
+    funding: store        # 自社のストアポイント原資。参加有無に関わらず毎日かかる
+    eligibility: all
+    note: "注文下限なし・付与上限なし"
 
-events:
-  # ------------------------------------------------------------------
-  - id: premium_sunday_1
-    name: "プレミアムな日曜日"
-    dates: ["2026-10-04"]
-    entry_required: true
-    entry_deadline: "2026-10-01"
-    traffic_multiplier: 1.35
-    entry_uplift: 0.38
-    aov_multiplier: 1.05
-    min_bonus_rate: 0.01
-    priority: 3
-    note: "LYPプレミアム会員向け。会員比率が高く高単価商材と相性が良い"
+  - id: line_daily
+    name: "LINEと連携で毎日もらえる"
+    days: all
+    rate: 0.03
+    funding: mall
+    eligibility: all
+    user_cap_yen: 5000
+    user_cap_period: month
+    note: "PayPayクレジット等での支払いが前提。PayPay残高等では2.5%"
 
-  - id: five_day_05
+  - id: paypay_credit
+    name: "PayPayクレジット等ご利用分"
+    days: all
+    rate: 0.01
+    funding: mall
+    eligibility: all
+    note: "PayPayポイント(通常)。注文下限・付与上限なし"
+
+  - id: lyp_premium
+    name: "LYPプレミアム会員特典"
+    days: all
+    rate: 0.02
+    funding: mall
+    eligibility: all
+    user_cap_yen: 5000
+    user_cap_period: month
+
+  # ======================================================================
+  # 日付が決まっている施策 — 全ストア(エントリー不要)
+  # ======================================================================
+  - id: first_day
+    name: "1日開催ファーストデイ"
+    days: [1]
+    rate: 0.03
+    funding: mall
+    eligibility: all
+    min_order_yen: 3000
+    user_cap_yen: 2000
+    user_cap_period: day
+
+  - id: five_day
     name: "5のつく日"
-    dates: ["2026-10-05"]
-    entry_required: true
-    traffic_multiplier: 1.55
-    entry_uplift: 0.42
-    min_bonus_rate: 0.01
-    priority: 4
+    days: [5, 15, 25]
+    rate: 0.04
+    funding: mall
+    eligibility: all
+    user_cap_yen: 2000
+    user_cap_period: day
+    note: "全ストア対象。エントリー不要"
 
-  - id: thanks_day
-    name: "Yahoo!ショッピング感謝デー"
-    dates: ["2026-10-08"]
-    entry_required: true
-    traffic_multiplier: 1.40
-    entry_uplift: 0.36
-    min_bonus_rate: 0.01
-    priority: 3
+  - id: point_up
+    name: "ポイントアップ+4%"
+    days: [8]
+    rate: 0.04
+    funding: mall
+    eligibility: all
+    min_order_yen: 3000
+    user_cap_yen: 2000
+    user_cap_period: day
+    note: "事前告知なし・事前のユーザー訴求NG。事前販促を組んではいけない"
+
+  # ======================================================================
+  # プロモーションパッケージ加入ストア向け
+  # ======================================================================
+  - id: premium_sunday
+    name: "プレミアムな日曜日+5%"
+    days: [4, 11, 18]
+    rate: 0.05
+    funding: mall
+    eligibility: promo_package
+    min_order_yen: 5000
+    user_cap_yen: 3000
+    user_cap_period: day
+    note: "全ユーザー対象。10/25(日)は対象外"
+
+  - id: kansha_day
+    name: "ヤフショ感謝デー"
+    days: [22]
+    rate: 0.04
+    funding: mall
+    eligibility: promo_package
+    user_cap_yen: 1000
+    user_cap_period: day
+    note: "シルバーランク+4%(既定)/ゴールドランク+5%。ランクに応じて rate を 0.05 に変更する"
+
+  - id: mall_coupon
+    name: "モールクーポン 1,000円OFF"
+    days: [5, 15, 25]
+    coupon_yen: 1000
+    funding: mall
+    eligibility: promo_package
+    min_order_yen: 25000
+    note: "注文下限25,000円。平均注文単価がこれを下回る場合は効果に算入されない"
 
   - id: bakugai_week
-    name: "爆買いWEEK"
-    dates: []
-    period: ["2026-10-12", "2026-10-16"]
-    entry_required: true
-    entry_unit: period          # 期間一括エントリー(途中離脱不可)
-    entry_deadline: "2026-10-07"
-    traffic_multiplier: 1.30
-    entry_uplift: 0.30
-    aov_multiplier: 1.08
-    min_bonus_rate: 0.02
-    priority: 4
-    note: "まとめ買い需要。本体+消耗品のセット訴求が効く"
+    name: "10月爆買WEEK"
+    period: ["2026-10-30", "2026-11-01"]
+    entry_unit: period
+    funding: mall
+    eligibility: promo_package
+    tiers:
+      - {min_total: 5000, rate: 0.04}
+      - {min_total: 20000, rate: 0.07}
+    user_cap_yen: 3500
+    user_cap_period: period
+    note: "加入ストアで買い回りOK。合計注文金額により付与率が変動。上限3,500円/3日間"
 
-  - id: five_day_15
-    name: "5のつく日"
-    dates: ["2026-10-15"]
-    entry_required: true
-    traffic_multiplier: 1.55
-    entry_uplift: 0.42
-    min_bonus_rate: 0.01
-    priority: 4
-    note: "爆買いWEEK期間と重複(効果は逓減して合算される)"
+  # ======================================================================
+  # ボーナスストアPlus — ここだけが日ごとのエントリー判断の対象
+  # ======================================================================
+  - id: bsplus_extra
+    name: "ボーナスストアPlusはさらに+2%"
+    days: [2, 7, 16, 20, 27, 28]
+    rate: 0.02
+    funding: mall
+    eligibility: bonus_store_plus
+    min_order_yen: 3000
+    user_cap_yen: 5000
+    user_cap_period: day
+    note: "参加して初めて開くモール負担の上乗せ。この6日がエントリーの主戦場"
 
-  - id: premium_sunday_2
-    name: "プレミアムな日曜日"
-    dates: ["2026-10-18"]
-    entry_required: true
-    entry_deadline: "2026-10-15"
-    traffic_multiplier: 1.35
-    entry_uplift: 0.38
-    aov_multiplier: 1.05
-    min_bonus_rate: 0.01
-    priority: 3
+  - id: bsplus_excellent_extra
+    name: "ボーナスストアPlusかつ優良ストアはさらに+3%"
+    days: [2, 7, 16, 20, 27, 28]
+    rate: 0.03
+    funding: mall
+    eligibility: bonus_store_plus_excellent
+    min_order_yen: 3000
+    user_cap_yen: 5000
+    user_cap_period: day
+    note: "優良ストア該当時のみ。現在は非該当のため評価に算入されない"
 
-  - id: chou_paypay_matsuri
-    name: "超PayPay祭"
-    dates: []
-    period: ["2026-10-20", "2026-10-25"]
-    entry_required: true
-    entry_unit: period          # 期間一括エントリー
-    entry_deadline: "2026-10-13"
-    traffic_multiplier: 1.60
-    entry_uplift: 0.55
-    aov_multiplier: 1.10
-    min_bonus_rate: 0.02
-    allowed_rates: [0.02, 0.03, 0.04, 0.05]
-    priority: 5
-    note: "年間最大級。最終日はグランドフィナーレで需要がさらに跳ねる"
-
-  - id: five_day_25
-    name: "5のつく日"
-    dates: ["2026-10-25"]
-    entry_required: true
-    traffic_multiplier: 1.55
-    entry_uplift: 0.42
-    min_bonus_rate: 0.01
-    priority: 4
-    note: "日曜 × 5のつく日 × 超PayPay祭グランドフィナーレの三重重複"
-
-  - id: grand_finale
-    name: "超PayPay祭グランドフィナーレ"
-    dates: ["2026-10-25"]
-    entry_required: true
-    traffic_multiplier: 1.45
-    entry_uplift: 0.40
-    aov_multiplier: 1.10
-    min_bonus_rate: 0.02
-    priority: 5
+# ======================================================================
+# 付与率で表せない施策・運用上の注意
+# ======================================================================
+notes:
+  - days: [26, 27, 28]
+    text: "ボーナスストアPlusのお買い物で引けるくじ(参加ストア対象)。当選確率が非公開のため期待値を置けず、需要モデルには算入していない。実際にはこの3日の参加価値をやや押し上げる"
+  - days: [8]
+    text: "ポイントアップ+4%は事前告知なし・事前のユーザー訴求NG。バナーやメルマガでの事前訴求を行わないこと"
+  - days: [11, 12]
+    text: "10/11(日)・10/12(月・スポーツの日)は連休。需要モデルの祝日補正は未実装のため、実績で上振れした場合は月次係数に吸収される"
+  - text: "エントリー締切はPDFに記載がない。判明次第 entry_deadline に記入すること(現在は開催3日前の暫定値)"

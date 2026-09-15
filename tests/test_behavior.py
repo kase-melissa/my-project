@@ -2,115 +2,122 @@ import unittest
 from datetime import date
 
 from bonus_planner.behavior import DemandModel, build_day_context, combine_with_decay
-from bonus_planner.config import BehaviorParams
-from bonus_planner.models import DayContext, PromoEvent, PromoSchedule
+from bonus_planner.config import BehaviorParams, StoreConfig
+from bonus_planner.models import Benefit, DayContext, Participation, PromoSchedule
+
+DAY = date(2026, 10, 7)
 
 
-def event(**kw):
-    base = dict(id="e", name="e", dates=(date(2026, 10, 4),))
+def ben(**kw):
+    base = dict(id="b", name="b", days=(DAY,))
     base.update(kw)
-    return PromoEvent(**base)
+    return Benefit(**base)
 
 
 class TestCombine(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(combine_with_decay([], 0.5), 0.0)
 
-    def test_single(self):
-        self.assertAlmostEqual(combine_with_decay([0.5], 0.5), 0.5)
-
-    def test_largest_first(self):
-        # 順序に関わらず大きい効果が満額、2つ目が逓減する
+    def test_largest_first_regardless_of_order(self):
         a = combine_with_decay([1.0, 0.5], 0.5)
         b = combine_with_decay([0.5, 1.0], 0.5)
         self.assertAlmostEqual(a, b)
         self.assertAlmostEqual(a, 1.25)
 
     def test_sublinear(self):
-        # 単純加算より必ず小さい
         self.assertLess(combine_with_decay([0.4, 0.4, 0.4], 0.55), 1.2)
 
 
 class TestDemandModel(unittest.TestCase):
     def setUp(self):
         self.p = BehaviorParams(base_orders=100.0, month={})
-        self.m = DemandModel(self.p)
+        self.store = StoreConfig(aov=20000, aov_sigma=0.55, promo_package=True)
+        self.m = DemandModel(self.p, self.store)
 
-    def ctx(self, day=date(2026, 10, 7), events=None):
-        return DayContext(
-            day=day,
-            events=events or [],
-            is_five_day=day.day in (5, 15, 25),
-            is_zorome=day.day in (11, 22),
-            weekday=day.weekday(),
-        )
+    def ctx(self, benefits=None, day=DAY):
+        return DayContext(day=day, benefits=benefits or [], weekday=day.weekday())
 
-    def test_rate_response_is_one_at_reference(self):
-        self.assertAlmostEqual(self.m.rate_response(self.p.reference_rate), 1.0)
+    # -- 市場規模 -----------------------------------------------------
+    def test_market_factor_is_one_at_baseline(self):
+        self.assertAlmostEqual(self.m.market_factor(self.p.baseline_rate), 1.0)
 
-    def test_rate_response_is_sublinear(self):
-        # 還元率を2倍にしても効果は2倍にならない
-        r1 = self.m.rate_response(0.02)
-        r2 = self.m.rate_response(0.04)
-        self.assertLess(r2, 2 * r1)
-        self.assertGreater(r2, r1)
+    def test_market_factor_grows_with_mall_wide_rate(self):
+        self.assertGreater(self.m.market_factor(0.11), self.m.market_factor(0.07))
 
-    def test_five_day_lifts_baseline(self):
-        plain = self.m.base_orders(self.ctx(date(2026, 10, 7)))
-        five = self.m.base_orders(self.ctx(date(2026, 10, 15)))
-        self.assertGreater(five / plain, 1.3)
+    def test_market_factor_is_sublinear(self):
+        # 付与率を2倍にしても来訪は2倍にならない
+        self.assertLess(self.m.market_factor(0.14), 2 * self.m.market_factor(0.07))
 
-    def test_explicit_event_suppresses_implicit_five_day(self):
-        # 公式スケジュールに明記がある日は暗黙の暦イベントを二重計上しない
-        ev = event(dates=(date(2026, 10, 15),), traffic_multiplier=1.2, entry_uplift=0.3)
-        c = self.ctx(date(2026, 10, 15), [ev])
-        self.assertEqual(self.m.implicit_events(c), [])
-        self.assertAlmostEqual(self.m.traffic_multiplier(c), 1.2)
+    # -- シェア -------------------------------------------------------
+    def test_share_factor_is_one_without_advantage(self):
+        self.assertAlmostEqual(self.m.share_factor(0.0), 1.0)
 
-    def test_entry_uplift_larger_on_event_day(self):
-        ev = event(traffic_multiplier=1.4, entry_uplift=0.38)
-        on_event = self.m.entry_uplift(self.ctx(date(2026, 10, 4), [ev]), 0.04)
-        on_plain = self.m.entry_uplift(self.ctx(date(2026, 10, 7)), 0.04)
-        self.assertGreater(on_event, on_plain)
+    def test_share_factor_at_reference_advantage(self):
+        expected = 1.0 + self.p.share_gain_at_reference
+        self.assertAlmostEqual(self.m.share_factor(self.p.reference_advantage), expected)
 
-    def test_uplift_never_below_normal_day_floor(self):
-        ev = event(entry_uplift=0.01, entry_required=False)
-        c = self.ctx(date(2026, 10, 7), [ev])
-        self.assertGreaterEqual(self.m.max_entry_uplift(c), self.p.normal_day_uplift)
+    def test_share_factor_is_independent_of_mall_wide_rate(self):
+        """同じ上乗せなら、その日の基準率が高くてもシェア効果は同じ.
 
-    def test_min_rate_from_events(self):
-        ev = event(entry_uplift=0.3, min_bonus_rate=0.03)
-        c = self.ctx(date(2026, 10, 4), [ev])
-        self.assertEqual(self.m.required_min_rate(c), 0.03)
-        self.assertEqual(min(self.m.allowed_rates(c)), 0.03)
+        顧客にとって2ポイント分の価値は基準率に依らず同じ金額のため。
+        比率で見るとモールが最も集客している日を避ける提案になってしまう。
+        """
+        self.assertAlmostEqual(self.m.share_factor(0.02), self.m.share_factor(0.02))
 
-    def test_allowed_rates_intersect_event_whitelist(self):
-        ev = event(entry_uplift=0.3, allowed_rates=(0.02, 0.03))
-        c = self.ctx(date(2026, 10, 4), [ev])
-        self.assertEqual(self.m.allowed_rates(c), [0.02, 0.03])
+    def test_share_factor_diminishes(self):
+        one = self.m.share_factor(0.02) - 1.0
+        two = self.m.share_factor(0.04) - 1.0
+        self.assertGreater(two, one)
+        self.assertLess(two, 2 * one)
 
-    def test_min_rate_outside_candidates_still_usable(self):
-        ev = event(entry_uplift=0.3, min_bonus_rate=0.08)
-        c = self.ctx(date(2026, 10, 4), [ev])
-        self.assertEqual(self.m.allowed_rates(c), [0.08])
-
-    def test_aov_multiplier_capped(self):
-        evs = [
-            event(id=f"e{i}", dates=(date(2026, 10, 4),), entry_uplift=0.2, aov_multiplier=1.5)
-            for i in range(4)
+    # -- 組み合わせ ---------------------------------------------------
+    def test_entry_raises_orders_when_gated_benefit_exists(self):
+        benefits = [
+            ben(id="base", rate=0.07, eligibility="all"),
+            ben(id="plus", rate=0.02, eligibility="bonus_store_plus"),
         ]
-        c = self.ctx(date(2026, 10, 4), evs)
-        self.assertLessEqual(self.m.aov_multiplier(c), self.p.aov_event_lift_cap)
+        c = self.ctx(benefits)
+        out = self.m.orders(c, Participation(promo_package=True, bonus_store_plus=False))
+        inn = self.m.orders(c, Participation(promo_package=True, bonus_store_plus=True))
+        self.assertGreater(inn, out)
+
+    def test_entry_does_nothing_without_gated_benefit(self):
+        benefits = [ben(id="base", rate=0.07, eligibility="all")]
+        c = self.ctx(benefits)
+        out = self.m.orders(c, Participation(promo_package=True, bonus_store_plus=False))
+        inn = self.m.orders(c, Participation(promo_package=True, bonus_store_plus=True))
+        self.assertAlmostEqual(out, inn)
+
+    def test_all_store_benefit_raises_market_not_share(self):
+        plain = self.ctx([ben(id="base", rate=0.07, eligibility="all")])
+        big = self.ctx([ben(id="base", rate=0.11, eligibility="all")])
+        part = Participation(promo_package=True)
+        self.assertGreater(self.m.orders(big, part), self.m.orders(plain, part))
+        # シェア側は動いていない
+        self.assertAlmostEqual(self.m.scoped_rates(big, part)[1], 0.0)
+
+    def test_traffic_multiplier_defaults_to_one(self):
+        c = self.ctx([ben(id="base", rate=0.07, eligibility="all")])
+        self.assertAlmostEqual(self.m.traffic_multiplier(c, Participation()), 1.0)
+
+    def test_traffic_multiplier_applies_when_set(self):
+        c = self.ctx([ben(id="ad", rate=0.07, eligibility="all", traffic_multiplier=1.3)])
+        self.assertAlmostEqual(self.m.traffic_multiplier(c, Participation()), 1.3)
+
+    def test_calendar_factor_uses_weekday_and_payday(self):
+        sunday = self.ctx(day=date(2026, 10, 25))
+        tuesday = self.ctx(day=date(2026, 10, 6))
+        self.assertGreater(self.m.calendar_factor(sunday), self.m.calendar_factor(tuesday))
 
     def test_build_day_context_flags(self):
         sched = PromoSchedule(
             month="2026-10", first_day=date(2026, 10, 1), last_day=date(2026, 10, 31),
-            events=(event(dates=(date(2026, 10, 25),), entry_uplift=0.4),),
+            benefits=(ben(days=(date(2026, 10, 25),), rate=0.04),),
         )
         c = build_day_context(sched, date(2026, 10, 25))
         self.assertTrue(c.is_five_day)
         self.assertTrue(c.is_payday_window)
-        self.assertEqual(len(c.events), 1)
+        self.assertEqual(len(c.benefits), 1)
 
 
 if __name__ == "__main__":

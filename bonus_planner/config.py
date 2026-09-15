@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from .models import Participation
+
 
 def load_yaml(path: str | Path) -> dict[str, Any]:
     p = Path(path)
@@ -22,39 +24,71 @@ def load_yaml(path: str | Path) -> dict[str, Any]:
 
 @dataclass
 class StoreConfig:
-    """自社(ストア)側の経済条件."""
+    """自社(ストア)側の経済条件と参加状態."""
 
     store_name: str = "ストア"
-    gross_margin_rate: float = 0.35      # 粗利率(モール手数料・送料控除後)
-    aov: float = 18000.0                 # 平均注文単価(円)
-    aov_sigma: float = 0.55              # 注文単価の対数標準偏差
-    point_cap_per_order: float = 5000.0  # 1注文あたり付与ポイント上限
-    point_fee_rate: float = 0.0          # ポイント原資にかかる手数料率
-    monthly_point_budget: float = 400000.0
-    min_roas: float = 4.0                # これを下回る日はエントリーしない
-    min_net_value: float = 0.0           # 1日あたり純増効果の下限(円)
-    new_customer_ratio: float = 0.45     # 増分注文のうち新規客の割合
-    ltv_uplift_per_new_customer: float = 3500.0  # 消耗品リピート等の将来粗利
-    mandatory_event_ids: list[str] = field(default_factory=list)
+    gross_margin_rate: float = 0.32
+    aov: float = 19800.0
+    aov_sigma: float = 0.55
+    point_cap_per_order: float = 5000.0
+    point_fee_rate: float = 0.0
+    monthly_point_budget: float = 500000.0
+    min_roas: float = 5.0
+    min_net_value: float = 0.0
+    new_customer_ratio: float = 0.50
+    ltv_uplift_per_new_customer: float = 4200.0
+
+    # 参加状態 — カレンダーの施策がどれだけ開くかを決める
+    promo_package: bool = False       # プロモーションパッケージ加入
+    excellent_store: bool = False     # 優良ストア該当
+
+    # ボーナスストアPlusで自社が設定できる還元率の候補(0=参加するが上乗せなし)
+    store_bonus_rates: list[float] = field(
+        default_factory=lambda: [0.0, 0.01, 0.02, 0.03, 0.04, 0.05]
+    )
+
+    # 採算に関わらず必ずエントリーする施策ID
+    mandatory_benefit_ids: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "StoreConfig":
-        known = {f for f in cls.__dataclass_fields__}
+        known = set(cls.__dataclass_fields__)
         unknown = set(d) - known
         if unknown:
             raise ValueError(f"store設定に未知のキーがあります: {sorted(unknown)}")
-        return cls(**d)
+        cfg = cls(**d)
+        cfg.validate()
+        return cfg
+
+    def validate(self) -> None:
+        if not 0 < self.gross_margin_rate < 1:
+            raise ValueError("gross_margin_rate は0と1の間である必要があります")
+        if self.aov <= 0:
+            raise ValueError("aov は正の数である必要があります")
+        if self.aov_sigma < 0:
+            raise ValueError("aov_sigma は0以上である必要があります")
+        if not self.store_bonus_rates:
+            raise ValueError("store_bonus_rates が空です")
+        if any(r < 0 for r in self.store_bonus_rates):
+            raise ValueError("store_bonus_rates に負の値があります")
+
+    def participation(self, bonus_store_plus: bool) -> Participation:
+        return Participation(
+            promo_package=self.promo_package,
+            excellent_store=self.excellent_store,
+            bonus_store_plus=bonus_store_plus,
+        )
 
 
 @dataclass
 class BehaviorParams:
     """Yahoo!ショッピング顧客の行動パラメータ.
 
-    既定値は業界的な相場観に基づく「初期仮値」。
-    自社の受注実績を `calibrate` サブコマンドに通して必ず上書きすること。
+    需要は「顧客が受け取る総付与率」で動く。baseline_rate(定常施策の合計)を
+    基準1.0として、付与率が上がったぶんだけ注文が増える形にしている。
     """
 
-    base_orders: float = 40.0
+    base_orders: float = 42.0
     dow: dict[str, float] = field(default_factory=lambda: {
         "mon": 0.95, "tue": 0.92, "wed": 0.95, "thu": 0.95,
         "fri": 1.00, "sat": 1.08, "sun": 1.18,
@@ -63,26 +97,54 @@ class BehaviorParams:
         "d01_05": 1.05, "d06_10": 0.93, "d11_15": 0.96,
         "d16_20": 0.92, "d21_24": 0.95, "d25_end": 1.16,
     })
-    month: dict[str, float] = field(default_factory=dict)  # "01".."12"
-    five_day_traffic: float = 1.55   # 5のつく日の需要倍率(エントリー非依存分)
-    five_day_uplift: float = 0.42    # 5のつく日にエントリーした場合の上乗せ
-    zorome_traffic: float = 1.10
-    zorome_uplift: float = 0.12
-    normal_day_uplift: float = 0.10  # 平常日にエントリーした場合の上乗せ
-    reference_rate: float = 0.04     # entry_uplift が定義される基準還元率
-    rate_elasticity: float = 0.55    # 還元率に対する反応の逓減指数(<1)
-    overlap_decay: float = 0.55      # イベント重複時の2件目以降の逓減
-    aov_event_lift_cap: float = 1.35
-    candidate_rates: list[float] = field(default_factory=lambda: [0.01, 0.02, 0.03, 0.04, 0.05])
+    month: dict[str, float] = field(default_factory=dict)
+
+    # 付与率への反応の基準点。定常施策だけの日の「全ストア共通」付与率を入れる。
+    baseline_rate: float = 0.07
+
+    # 市場規模の弾力性(全ストア共通の付与率に対する比率反応):
+    #   全ストア共通の付与率が上がると、モール全体の来訪者が増える。
+    #   競合も同条件なので自社のシェアは変わらず、パイだけが大きくなる。
+    #   既定 0.9 は「5のつく日(7%→11%)で来訪が約1.5倍」に合わせた値。
+    #   自社の実績でこの倍率が分かれば、そこから逆算して設定し直すこと。
+    market_elasticity: float = 0.90
+
+    # シェアの反応: 競合に対する付与率の「絶対差」で決まる。
+    #   顧客から見た上乗せ2ポイント分の価値は、その日の基準率が7%でも11%でも
+    #   同じ金額(2万円の注文なら400円)。したがって比率ではなく絶対差で見る。
+    #   reference_advantage の優位があるとき注文が share_gain_at_reference だけ増え、
+    #   それ以上の優位は share_elasticity で逓減する。
+    reference_advantage: float = 0.02       # 基準となる優位(2ポイント)
+    share_gain_at_reference: float = 0.20   # そのときの注文増加率
+    share_elasticity: float = 0.70          # 優位を増やしたときの逓減
+    # traffic_multiplier が複数重なったときの逓減
+    overlap_decay: float = 0.55
+
     calibration_note: str = "未キャリブレーション(初期仮値)"
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "BehaviorParams":
-        known = {f for f in cls.__dataclass_fields__}
+        known = set(cls.__dataclass_fields__)
         unknown = set(d) - known
         if unknown:
             raise ValueError(f"behavior設定に未知のキーがあります: {sorted(unknown)}")
-        return cls(**d)
+        params = cls(**d)
+        params.validate()
+        return params
+
+    def validate(self) -> None:
+        if self.base_orders <= 0:
+            raise ValueError("base_orders は正の数である必要があります")
+        if self.baseline_rate <= 0:
+            raise ValueError("baseline_rate は正の数である必要があります")
+        if not 0 < self.market_elasticity <= 1:
+            raise ValueError("market_elasticity は0より大きく1以下である必要があります")
+        if not 0 < self.share_elasticity <= 1:
+            raise ValueError("share_elasticity は0より大きく1以下である必要があります")
+        if self.reference_advantage <= 0:
+            raise ValueError("reference_advantage は正の数である必要があります")
+        if self.share_gain_at_reference <= 0:
+            raise ValueError("share_gain_at_reference は正の数である必要があります")
 
     def to_dict(self) -> dict[str, Any]:
         return {f: getattr(self, f) for f in self.__dataclass_fields__}
@@ -94,7 +156,9 @@ class AppConfig:
     behavior: BehaviorParams
 
     @classmethod
-    def load(cls, config_path: str | Path, behavior_path: str | Path | None = None) -> "AppConfig":
+    def load(
+        cls, config_path: str | Path, behavior_path: str | Path | None = None
+    ) -> "AppConfig":
         raw = load_yaml(config_path)
         store = StoreConfig.from_dict(raw.get("store", {}))
         if behavior_path is not None:

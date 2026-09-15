@@ -1,102 +1,211 @@
 import math
 import random
+import tempfile
 import unittest
 from datetime import date, timedelta
+from pathlib import Path
 
 from bonus_planner import calendar_rules as cal
 from bonus_planner.calibrate import (
-    HistoryRow,
-    calibrate,
+    DailyRow,
+    MonthlyRow,
+    calibrate_daily,
+    calibrate_monthly,
     estimate_aov_sigma,
-    event_factors,
+    load_history,
+    theil_sen_slope,
 )
 from bonus_planner.config import BehaviorParams
 
-TRUE_BASE = 50.0
-TRUE_DOW = {"mon": 0.90, "tue": 0.90, "wed": 0.95, "thu": 0.95,
-            "fri": 1.00, "sat": 1.10, "sun": 1.20}
-TRUE_FIVE_TRAFFIC = 1.50
-TRUE_FIVE_UPLIFT = 0.40
+PRIOR = BehaviorParams(month={})
+
+# 合成データの正解値
+TRUE_DAILY_INDEX = 40.0
+TRUE_MONTHLY_GROWTH = 1.01
+TRUE_SEASON = {
+    1: 0.95, 2: 0.90, 3: 1.10, 4: 1.05, 5: 0.95, 6: 0.90,
+    7: 1.15, 8: 1.10, 9: 1.00, 10: 1.05, 11: 0.95, 12: 1.20,
+}
+TRUE_AOV = 21000.0
 
 
-def synth(days=540, noise=0.0, seed=7):
+def _weight(year: int, month: int, days: int | None = None) -> float:
+    row = MonthlyRow(year, month, 1, 1, days)
+    return sum(
+        PRIOR.dow[cal.weekday_key(d)] * PRIOR.dom[cal.dom_bucket(d)]
+        for d in row.covered_days()
+    )
+
+
+def synth_monthly(n=13, start=(2025, 9), noise=0.0, seed=11, partial_last=None):
     rng = random.Random(seed)
-    rows, day = [], date(2025, 1, 1)
-    for _ in range(days):
-        expected = TRUE_BASE * TRUE_DOW[cal.weekday_key(day)]
-        entered = False
-        rate = 0.0
-        if cal.is_five_day(day):
-            expected *= TRUE_FIVE_TRAFFIC
-            entered = day.day == 15  # 15日だけエントリーし、5日/25日は未エントリー
-            if entered:
-                rate = 0.04
-                expected *= 1.0 + TRUE_FIVE_UPLIFT
+    rows = []
+    y, m = start
+    for i in range(n):
+        level = TRUE_DAILY_INDEX * (TRUE_MONTHLY_GROWTH ** i) * TRUE_SEASON[m]
+        days = partial_last if (i == n - 1 and partial_last) else None
+        orders = level * _weight(y, m, days)
         if noise:
-            expected *= math.exp(rng.gauss(0, noise))
-        rows.append(HistoryRow(day, round(expected, 2), expected * 20000, entered, rate, []))
-        day += timedelta(days=1)
+            orders *= math.exp(rng.gauss(0, noise))
+        rows.append(MonthlyRow(y, m, round(orders, 2), round(orders * TRUE_AOV), days))
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
     return rows
 
 
-class TestCalibrate(unittest.TestCase):
-    def test_recovers_factors_without_noise(self):
-        prior = BehaviorParams(dom={k: 1.0 for k in BehaviorParams().dom}, month={})
-        params, _ = calibrate(synth(), prior)
-        self.assertAlmostEqual(params.base_orders, TRUE_BASE, delta=1.5)
-        self.assertAlmostEqual(params.dow["sun"] / params.dow["mon"], 1.20 / 0.90, delta=0.05)
-        self.assertAlmostEqual(params.five_day_traffic, TRUE_FIVE_TRAFFIC, delta=0.08)
-        self.assertAlmostEqual(params.five_day_uplift, TRUE_FIVE_UPLIFT, delta=0.08)
+class TestTheilSen(unittest.TestCase):
+    def test_recovers_slope(self):
+        xs = [float(i) for i in range(10)]
+        ys = [3.0 + 2.0 * x for x in xs]
+        self.assertAlmostEqual(theil_sen_slope(xs, ys), 2.0)
+
+    def test_robust_to_outlier(self):
+        xs = [float(i) for i in range(10)]
+        ys = [3.0 + 2.0 * x for x in xs]
+        ys[5] = 999.0
+        self.assertAlmostEqual(theil_sen_slope(xs, ys), 2.0, delta=0.2)
+
+    def test_empty(self):
+        self.assertEqual(theil_sen_slope([], []), 0.0)
+
+
+class TestMonthlyCalibration(unittest.TestCase):
+    def test_recovers_seasonality_without_shrinkage(self):
+        result = calibrate_monthly(synth_monthly(), PRIOR, shrinkage=1.0)
+        mean_true = sum(TRUE_SEASON.values()) / 12
+        for m, truth in TRUE_SEASON.items():
+            got = result.params.month[f"{m:02d}"]
+            self.assertAlmostEqual(got, truth / mean_true, delta=0.06, msg=f"{m}月")
+
+    def test_shrinkage_pulls_toward_one(self):
+        full = calibrate_monthly(synth_monthly(), PRIOR, shrinkage=1.0)
+        half = calibrate_monthly(synth_monthly(), PRIOR, shrinkage=0.5)
+        for key in full.params.month:
+            self.assertLessEqual(
+                abs(half.params.month[key] - 1.0),
+                abs(full.params.month[key] - 1.0) + 1e-6,
+                msg=key,
+            )
+
+    def test_recovers_base_orders_level(self):
+        rows = synth_monthly()
+        result = calibrate_monthly(rows, PRIOR, shrinkage=1.0)
+        # 直近月のトレンド水準 (季節性を除いた日次水準)
+        expected = TRUE_DAILY_INDEX * (TRUE_MONTHLY_GROWTH ** (len(rows) - 1))
+        self.assertAlmostEqual(result.params.base_orders, expected, delta=expected * 0.12)
+
+    def test_recovers_aov(self):
+        result = calibrate_monthly(synth_monthly(), PRIOR)
+        self.assertAlmostEqual(result.suggested_aov, TRUE_AOV, delta=TRUE_AOV * 0.02)
 
     def test_tolerates_noise(self):
-        prior = BehaviorParams(dom={k: 1.0 for k in BehaviorParams().dom}, month={})
-        params, _ = calibrate(synth(noise=0.15), prior)
-        self.assertAlmostEqual(params.five_day_traffic, TRUE_FIVE_TRAFFIC, delta=0.15)
+        result = calibrate_monthly(synth_monthly(noise=0.08), PRIOR, shrinkage=1.0)
+        mean_true = sum(TRUE_SEASON.values()) / 12
+        self.assertAlmostEqual(
+            result.params.month["12"], TRUE_SEASON[12] / mean_true, delta=0.18
+        )
 
-    def test_five_day_excluded_from_plain_days(self):
-        # 5のつく日を平常日に混ぜると曜日係数が上振れする。除外されていることを確認。
-        prior = BehaviorParams(dom={k: 1.0 for k in BehaviorParams().dom}, month={})
-        params, _ = calibrate(synth(), prior)
-        mean_dow = sum(params.dow.values()) / len(params.dow)
-        self.assertAlmostEqual(mean_dow, 1.0, delta=0.01)
+    def test_does_not_touch_weekday_or_payday_factors(self):
+        """月次データでは曜日・給料日サイクルは推定できない。仮値のまま残すこと."""
+        result = calibrate_monthly(synth_monthly(), PRIOR)
+        self.assertEqual(result.params.dow, PRIOR.dow)
+        self.assertEqual(result.params.dom, PRIOR.dom)
+        self.assertEqual(result.params.share_elasticity, PRIOR.share_elasticity)
+        self.assertEqual(result.params.market_elasticity, PRIOR.market_elasticity)
 
-    def test_dow_normalized_to_mean_one(self):
-        prior = BehaviorParams(month={})
-        params, _ = calibrate(synth(noise=0.1), prior)
-        self.assertAlmostEqual(sum(params.dow.values()) / 7, 1.0, delta=0.01)
+    def test_note_states_what_is_uncalibrated(self):
+        result = calibrate_monthly(synth_monthly(), PRIOR)
+        self.assertIn("未校正", result.params.calibration_note)
+        self.assertIn("曜日係数", result.params.calibration_note)
 
-    def test_note_records_period_and_sample_size(self):
-        params, _ = calibrate(synth(days=90), BehaviorParams(month={}))
-        self.assertIn("2025-01-01", params.calibration_note)
-        self.assertIn("校正", params.calibration_note)
+    def test_partial_month_is_scaled_by_days(self):
+        full = calibrate_monthly(synth_monthly(), PRIOR, shrinkage=1.0)
+        partial = calibrate_monthly(synth_monthly(partial_last=14), PRIOR, shrinkage=1.0)
+        self.assertAlmostEqual(
+            partial.params.base_orders, full.params.base_orders,
+            delta=full.params.base_orders * 0.05,
+        )
 
-    def test_insufficient_samples_keeps_prior(self):
-        prior = BehaviorParams(five_day_traffic=1.99, month={})
+    def test_warns_when_last_month_is_current_and_days_missing(self):
+        rows = synth_monthly(n=13, start=(2025, 9))
+        result = calibrate_monthly(rows, PRIOR, today=date(2026, 9, 15))
+        self.assertTrue(any("当月" in n for n in result.notes))
+
+    def test_warns_on_short_series(self):
+        result = calibrate_monthly(synth_monthly(n=4), PRIOR)
+        self.assertTrue(any("ヶ月しかありません" in n for n in result.notes))
+
+    def test_missing_months_keep_prior(self):
+        result = calibrate_monthly(synth_monthly(n=4), PRIOR)
+        self.assertTrue(any("実績のない月" in n for n in result.notes))
+
+    def test_requires_two_months(self):
+        with self.assertRaises(ValueError):
+            calibrate_monthly(synth_monthly(n=1), PRIOR)
+
+
+class TestDailyCalibration(unittest.TestCase):
+    def test_recovers_weekday_shape(self):
+        true_dow = {"mon": 0.90, "tue": 0.90, "wed": 0.95, "thu": 0.95,
+                    "fri": 1.00, "sat": 1.10, "sun": 1.20}
+        rows, day = [], date(2025, 1, 1)
+        for _ in range(400):
+            rows.append(DailyRow(day, 50 * true_dow[cal.weekday_key(day)], 0))
+            day += timedelta(days=1)
+        params, _ = calibrate_daily(rows, BehaviorParams(
+            dom={k: 1.0 for k in PRIOR.dom}, month={}))
+        self.assertAlmostEqual(
+            params.dow["sun"] / params.dow["mon"], 1.20 / 0.90, delta=0.05
+        )
+
+    def test_notes_rate_elasticity_uncalibrated(self):
         rows = [
-            HistoryRow(date(2025, 1, 1) + timedelta(days=i), 50, 1_000_000, False, 0.0, [])
-            for i in range(20)
+            DailyRow(date(2025, 1, 1) + timedelta(days=i), 50, 1_000_000)
+            for i in range(120)
         ]
-        params, notes = calibrate(rows, prior)
-        self.assertEqual(params.five_day_traffic, 1.99)
-        self.assertTrue(any("5のつく日" in n for n in notes))
-
-    def test_empty_history_rejected(self):
-        with self.assertRaises(Exception):
-            calibrate([], BehaviorParams())
+        _, notes = calibrate_daily(rows, PRIOR)
+        self.assertTrue(any("弾力性" in n for n in notes))
 
 
-class TestEventFactors(unittest.TestCase):
-    def test_returns_none_when_samples_insufficient(self):
-        # サンプル不足を 0.0 で返すと「効果なし」と誤読される
-        rows = [
-            HistoryRow(date(2025, 1, 1) + timedelta(days=i), 50, 1_000_000,
-                       True, 0.04, ["超PayPay祭"])
-            for i in range(5)
-        ]
-        f = event_factors(rows, BehaviorParams())["超PayPay祭"]
-        self.assertIsNone(f["traffic_multiplier"])
-        self.assertIsNone(f["entry_uplift"])
-        self.assertEqual(f["samples"], 5)
+class TestLoadHistory(unittest.TestCase):
+    def _write(self, text):
+        f = tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False, encoding="utf-8")
+        f.write(text)
+        f.close()
+        return Path(f.name)
+
+    def test_detects_monthly(self):
+        kind, rows = self._load("month,orders,gmv\n2025-09,1200,24000000\n2025-10,1300,26000000\n")
+        self.assertEqual(kind, "monthly")
+        self.assertEqual(len(rows), 2)
+
+    def test_detects_daily(self):
+        kind, rows = self._load("date,orders,gmv\n2025-09-01,40,800000\n2025-09-02,45,900000\n")
+        self.assertEqual(kind, "daily")
+        self.assertEqual(len(rows), 2)
+
+    def test_parses_partial_days_column(self):
+        _, rows = self._load("month,orders,gmv,days\n2026-09,600,12000000,14\n2026-08,1300,26000000,\n")
+        by_month = {r.month: r for r in rows}
+        self.assertEqual(by_month[9].days, 14)
+        self.assertTrue(by_month[9].is_partial)
+        self.assertIsNone(by_month[8].days)
+
+    def test_rejects_days_beyond_month_length(self):
+        with self.assertRaisesRegex(ValueError, "矛盾"):
+            self._load("month,orders,gmv,days\n2026-09,600,12000000,31\n")
+
+    def test_rejects_unknown_first_column(self):
+        with self.assertRaisesRegex(ValueError, "1列目"):
+            self._load("period,orders\n2025-09,1200\n")
+
+    def test_rejects_missing_orders(self):
+        with self.assertRaisesRegex(ValueError, "orders"):
+            self._load("month,gmv\n2025-09,24000000\n")
+
+    def _load(self, text):
+        return load_history(self._write(text))
 
 
 class TestAovSigma(unittest.TestCase):

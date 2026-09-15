@@ -1,19 +1,34 @@
 """Yahoo!ショッピング顧客の行動モデル(需要予測).
 
-乗算モデル:
-    注文数(d) = base_orders x 曜日係数 x 給料日サイクル係数 x 月係数
-                x イベント需要倍率(重複逓減)
-                x (1 + エントリー上乗せ率)
+    注文数(d) = base_orders
+              × 曜日係数 × 給料日サイクル係数 × 月次季節係数
+              × 市場規模係数(全ストア共通の付与率)     ← パイの大きさ
+              × シェア係数(自社だけの上乗せ)          ← パイの取り分
+              × 集客係数(付与率とは別の広告効果)
 
-「イベント需要倍率」と「エントリー上乗せ率」を分けているのが設計上の要点:
+## 全ストア共通の付与率とシェアを分ける理由
 
-  traffic_multiplier ... エントリーしてもしなくても得られるモール全体の需要増
-  entry_uplift       ... エントリーして初めて得られる分
-                         (特集面掲載 + 「ボーナスストア対象」絞り込み + 還元率表示によるCVR改善)
+販促カレンダーの施策は2種類ある。
 
-したがって「プレミアムな日曜日」「感謝デー」「超PayPay祭」「爆買いWEEK」のような
-エントリー必須イベントでは、エントリーしないと entry_uplift 分がまるごと機会損失になり、
-その機会損失の大きさがそのまま提案の優先順位になる。
+  全ストア対象 (5のつく日・ファーストデイ・定常施策)
+      競合も同じ条件になるので、自社のシェアは動かない。
+      動くのはモール全体の来訪者数、つまり市場規模。
+
+  参加資格つき (ボーナスストアPlus参加・プロモーションパッケージ加入)
+      持っていない競合に対する優位になるので、シェアが動く。
+      自社設定の還元率も同じくシェアを動かす。
+
+この2つを1本の反応関数にまとめると、「すでに付与率が高い日は追加の効きが鈍い」
+という逓減が効きすぎて、モールが最も集客している日(5のつく日など)を
+避ける提案になってしまう。実務感覚と逆で、モデルの作りに起因する歪みになる。
+
+分けておけば、5のつく日は「パイが大きい日」として正しく評価され、
+ボーナスストアPlus指定日は「自社だけ有利になれる日」として評価される。
+
+## エントリー判断との関係
+
+ボーナスストアPlusに参加すると、その日だけ開くモール負担の上乗せが
+シェア側に乗る。参加しなければその分がまるごと機会損失になる。
 """
 
 from __future__ import annotations
@@ -21,14 +36,15 @@ from __future__ import annotations
 from datetime import date
 
 from . import calendar_rules as cal
-from .config import BehaviorParams
-from .models import DayContext, PromoEvent, PromoSchedule
+from .config import BehaviorParams, StoreConfig
+from .economics import perceived_total_rate, rate_by_scope
+from .models import DayContext, Participation, PromoSchedule
 
 
 def build_day_context(schedule: PromoSchedule, day: date) -> DayContext:
     return DayContext(
         day=day,
-        events=schedule.events_on(day),
+        benefits=schedule.benefits_on(day),
         is_five_day=cal.is_five_day(day),
         is_zorome=cal.is_zorome(day),
         is_payday_window=cal.is_payday_window(day),
@@ -39,9 +55,8 @@ def build_day_context(schedule: PromoSchedule, day: date) -> DayContext:
 def combine_with_decay(deltas: list[float], decay: float) -> float:
     """重複する効果を逓減させながら合算する.
 
-    2.2倍 x 1.8倍 x 1.5倍 のような単純な掛け算は現実には起こらない
-    (同じ購買意欲の高い顧客層を取り合うため)。
     大きい順に並べ、2件目以降を decay^i で割り引いて足し込む。
+    同じ購買意欲の高い顧客層を取り合うため、単純な掛け算にはならない。
 
     >>> round(combine_with_decay([1.0, 0.5], 0.5), 4)
     1.25
@@ -53,92 +68,89 @@ def combine_with_decay(deltas: list[float], decay: float) -> float:
 
 
 class DemandModel:
-    """日次の注文数・注文単価を推定する."""
+    """日次の注文数を推定する."""
 
-    def __init__(self, params: BehaviorParams) -> None:
+    def __init__(self, params: BehaviorParams, store: StoreConfig) -> None:
         self.p = params
+        self.store = store
 
     # -- 暦要因 -------------------------------------------------------
     def calendar_factor(self, ctx: DayContext) -> float:
         p = self.p
-        factor = p.dow.get(cal.weekday_key(ctx.day), 1.0)
-        factor *= p.dom.get(cal.dom_bucket(ctx.day), 1.0)
-        factor *= p.month.get(f"{ctx.day.month:02d}", 1.0)
-        return factor
+        return (
+            p.dow.get(cal.weekday_key(ctx.day), 1.0)
+            * p.dom.get(cal.dom_bucket(ctx.day), 1.0)
+            * p.month.get(f"{ctx.day.month:02d}", 1.0)
+        )
 
-    def implicit_events(self, ctx: DayContext) -> list[tuple[str, float, float]]:
-        """スケジュールに明記されていない暦イベント(5のつく日/ゾロ目).
+    def traffic_multiplier(self, ctx: DayContext, part: Participation) -> float:
+        """付与率とは別に働くモール集客増(広告出稿など).
 
-        販促スケジュール側で同じ日に明示イベントがある場合は、
-        二重計上を避けるため暗黙イベントは採用しない
-        (公式スケジュールを常に正とする)。
+        付与率の効果は rate_response が担うため、ここを1.0以外にすると
+        二重計上になる。確認できた施策にだけ設定する。
         """
-        if ctx.events:
-            return []
-        out: list[tuple[str, float, float]] = []
-        if ctx.is_five_day:
-            out.append(("5のつく日", self.p.five_day_traffic, self.p.five_day_uplift))
-        if ctx.is_zorome:
-            out.append(("ゾロ目の日", self.p.zorome_traffic, self.p.zorome_uplift))
-        return out
-
-    # -- 需要 ---------------------------------------------------------
-    def traffic_multiplier(self, ctx: DayContext) -> float:
-        deltas = [e.traffic_multiplier - 1.0 for e in ctx.events]
-        deltas += [t - 1.0 for _, t, _ in self.implicit_events(ctx)]
+        deltas = [
+            b.traffic_multiplier - 1.0
+            for b in ctx.benefits
+            if b.is_active(part) and b.traffic_multiplier != 1.0
+        ]
         return 1.0 + combine_with_decay(deltas, self.p.overlap_decay)
 
-    def base_orders(self, ctx: DayContext) -> float:
-        """エントリーしなかった場合の注文数."""
-        return self.p.base_orders * self.calendar_factor(ctx) * self.traffic_multiplier(ctx)
+    # -- 付与率への反応 -----------------------------------------------
+    def total_rate(self, ctx: DayContext, part: Participation) -> float:
+        """その日に顧客が受け取る体感総付与率(注文下限・付与上限込み)."""
+        return perceived_total_rate(ctx.benefits, part, self.store)
 
-    def aov_multiplier(self, ctx: DayContext) -> float:
-        """イベント日は高単価商材が動きやすい(比較検討していた層が決済する)."""
-        deltas = [e.aov_multiplier - 1.0 for e in ctx.events]
-        mult = 1.0 + combine_with_decay(deltas, self.p.overlap_decay)
-        return min(mult, self.p.aov_event_lift_cap)
+    def scoped_rates(self, ctx: DayContext, part: Participation) -> tuple[float, float]:
+        """(全ストア共通の付与率, 自社だけの上乗せ率) を返す."""
+        return rate_by_scope(ctx.benefits, part, self.store)
 
-    # -- エントリー効果 -----------------------------------------------
-    def max_entry_uplift(self, ctx: DayContext) -> float:
-        """参照還元率でエントリーした場合の注文増加率."""
-        deltas = [e.entry_uplift for e in ctx.events]
-        deltas += [u for _, _, u in self.implicit_events(ctx)]
-        if not deltas:
-            return self.p.normal_day_uplift
-        combined = combine_with_decay(deltas, self.p.overlap_decay)
-        # 平常日でも得られる底上げ分は下回らない
-        return max(combined, self.p.normal_day_uplift)
+    def market_factor(self, mall_wide_rate: float) -> float:
+        """モール全体の需要規模. 全ストア共通の付与率で決まる.
 
-    def rate_response(self, perceived_rate: float) -> float:
-        """還元率に対する反応(逓減).
-
-        参照還元率で1.0。指数が1未満なので、還元率を2倍にしても効果は2倍にならない。
-        ポイント上限で頭打ちになった体感還元率を入力に使う点が重要。
+        baseline_rate(定常施策のみの日)で1.0。
+        競合も同条件なので、ここが上がってもシェアは変わらない。
         """
-        if perceived_rate <= 0:
+        if mall_wide_rate <= 0:
             return 0.0
-        return (perceived_rate / self.p.reference_rate) ** self.p.rate_elasticity
+        return (mall_wide_rate / self.p.baseline_rate) ** self.p.market_elasticity
 
-    def entry_uplift(self, ctx: DayContext, perceived_rate: float) -> float:
-        return self.max_entry_uplift(ctx) * self.rate_response(perceived_rate)
+    def share_factor(self, own_advantage: float) -> float:
+        """自社シェア. 競合に対する付与率の「絶対差」で決まる.
 
-    # -- 制約 ---------------------------------------------------------
-    def required_min_rate(self, ctx: DayContext) -> float:
-        """その日にエントリーするために最低限必要な還元率."""
-        return max((e.min_bonus_rate for e in ctx.events), default=0.0)
+        基準は「参加資格つき施策を何も持たないストア」。優位ゼロで1.0。
 
-    def allowed_rates(self, ctx: DayContext) -> list[float]:
-        """その日に選べる還元率の候補."""
-        candidates = set(self.p.candidate_rates)
-        for e in ctx.events:
-            if e.allowed_rates:
-                candidates &= set(e.allowed_rates)
-        floor = self.required_min_rate(ctx)
-        usable = sorted(r for r in candidates if r >= floor)
-        if not usable and floor > 0:
-            # イベントの最低還元率が候補外なら、その最低値のみ選択可能とする
-            usable = [floor]
-        return usable
+        比率ではなく絶対差で見るのが要点。顧客にとって上乗せ2ポイント分の
+        価値は、その日の基準率が7%でも11%でも同じ金額(2万円の注文なら400円)。
+        比率で見ると、基準率が高い日ほど同じ上乗せが小さく評価され、
+        モールが最も集客している日を避ける提案になってしまう。
+        """
+        if own_advantage <= 0:
+            return 1.0
+        ratio = own_advantage / self.p.reference_advantage
+        return 1.0 + self.p.share_gain_at_reference * (ratio ** self.p.share_elasticity)
 
-    def entry_required_events(self, ctx: DayContext) -> list[PromoEvent]:
-        return [e for e in ctx.events if e.entry_required]
+    # -- 需要 ---------------------------------------------------------
+    def orders(self, ctx: DayContext, part: Participation, own_rate: float = 0.0) -> float:
+        mall_wide, gated = self.scoped_rates(ctx, part)
+        return (
+            self.p.base_orders
+            * self.calendar_factor(ctx)
+            * self.traffic_multiplier(ctx, part)
+            * self.market_factor(mall_wide)
+            * self.share_factor(gated + own_rate)
+        )
+
+    # -- エントリー判断に関わる情報 -----------------------------------
+    def entry_gated_benefits(self, ctx: DayContext) -> list:
+        """ボーナスストアPlus参加で初めて開く施策."""
+        return [b for b in ctx.benefits if b.requires_entry]
+
+    def unlocked_rate(self, ctx: DayContext, store: StoreConfig) -> float:
+        """参加で開くモール負担分の付与率(自社設定率を除く).
+
+        これがゼロの日は、参加しても自社のポイント原資を配るだけになる。
+        """
+        part_out = store.participation(bonus_store_plus=False)
+        part_in = store.participation(bonus_store_plus=True)
+        return self.total_rate(ctx, part_in) - self.total_rate(ctx, part_out)
