@@ -36,6 +36,9 @@ class StoreConfig:
     # 注文明細(金額列)のパス。あれば実測分布を使う。
     # 注文下限・付与上限の効き方は分布の形で決まるため、明細があるほうが正確。
     order_values_file: str | None = None
+    # ボーナスストアPlusの参加履歴(date,store_rate)のパス。
+    # 実績の転換率に含まれる「自社参加による上振れ」を差し引くのに使う。
+    participation_file: str | None = None
     point_cap_per_order: float = 5000.0
     point_fee_rate: float = 0.0
     monthly_point_budget: float = 500000.0

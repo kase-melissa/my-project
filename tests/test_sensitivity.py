@@ -26,8 +26,18 @@ class TestScenarios(unittest.TestCase):
         cls.schedule = load_schedule(SCHEDULE)
         cls.scenarios = run_scenarios(cls.cfg, cls.schedule, TODAY)
 
-    def test_three_scenarios(self):
-        self.assertEqual([s.name for s in self.scenarios], ["弱気", "既定", "強気"])
+    def test_scenarios_span_weak_to_strong(self):
+        self.assertEqual(
+            [s.name for s in self.scenarios], ["実測点推定", "弱気", "既定", "強気"]
+        )
+        gains = [s.share_gain_at_reference for s in self.scenarios]
+        self.assertEqual(gains, sorted(gains))
+
+    def test_weakest_scenario_still_keeps_bonus_store_plus_days(self):
+        """最も弱い前提でも、モール負担の上乗せが開く6日は残る."""
+        weakest = self.scenarios[0]
+        days = {d.day for d in weakest.selected_days if d.month == 10}
+        self.assertTrue({2, 7, 16, 20, 27, 28} <= days, sorted(days))
 
     def test_default_uses_configured_params(self):
         default = next(s for s in self.scenarios if s.name == "既定")

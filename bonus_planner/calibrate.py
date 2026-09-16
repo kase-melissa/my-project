@@ -302,6 +302,7 @@ def calibrate_monthly(
     today: date | None = None,
     average_market_factor: float = 1.0,
     average_share_factor: float = 1.0,
+    share_factor_by_month: dict[str, float] | None = None,
 ) -> MonthlyCalibration:
     """月次実績から base_sessions・base_cvr・月次季節係数・推奨aovを推定する.
 
@@ -389,18 +390,35 @@ def calibrate_monthly(
     if has_sessions:
         for r in rows:
             cvr_at[r.key] = round(r.cvr, 5)
-        cvr_trend_at = _theil_sen_trend(list(cvr_at), cvr_at)
-        base_cvr = cvr_trend_at[keys[-1]]
-        # 実績の転換率には、プロモーションパッケージ加入で開く施策による
-        # 上振れがすでに含まれている。モデルはこれをシェア係数で作るため、
+
+        # 実績の転換率には、参加資格つき施策と自社のボーナスストアPlus参加に
+        # よる上振れがすでに含まれている。モデルはこれをシェア係数で作るため、
         # 補正しないと同じ効果を二度乗せることになる(集客側と同じ構造)。
-        if average_share_factor and average_share_factor > 0:
-            base_cvr /= average_share_factor
-            if abs(average_share_factor - 1.0) > 0.01:
-                notes.append(
-                    f"参加資格つき施策による転換率の上振れ"
-                    f"(平均{average_share_factor:.3f}倍)を実績から差し引きました"
-                )
+        #
+        # 参加が途中の月から始まっている場合、トレンドを当ててから定数で割ると
+        # 参加による段差をトレンドとして吸収してしまう。
+        # **月ごとに補正してからトレンドを当てる**。
+        if share_factor_by_month:
+            adjusted = {
+                k: v / share_factor_by_month.get(k, 1.0) for k, v in cvr_at.items()
+            }
+            cvr_trend_at = _theil_sen_trend(list(adjusted), adjusted)
+            base_cvr = cvr_trend_at[keys[-1]]
+            used = [share_factor_by_month.get(k, 1.0) for k in cvr_at]
+            notes.append(
+                f"参加資格つき施策と自社参加による転換率の上振れを月ごとに"
+                f"差し引きました(補正係数 {min(used):.3f}〜{max(used):.3f})"
+            )
+        else:
+            cvr_trend_at = _theil_sen_trend(list(cvr_at), cvr_at)
+            base_cvr = cvr_trend_at[keys[-1]]
+            if average_share_factor and average_share_factor > 0:
+                base_cvr /= average_share_factor
+                if abs(average_share_factor - 1.0) > 0.01:
+                    notes.append(
+                        f"参加資格つき施策による転換率の上振れ"
+                        f"(平均{average_share_factor:.3f}倍)を実績から差し引きました"
+                    )
         base_sessions = level
     else:
         base_cvr = prior.base_cvr

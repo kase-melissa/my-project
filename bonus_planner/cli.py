@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 import sys
 from datetime import date
 from pathlib import Path
@@ -16,7 +17,18 @@ from .distribution import EmpiricalDistribution, load_order_values
 from .optimizer import OBJECTIVES, optimize
 from .planner import build_entry_units
 from .report import render_html, render_markdown, write_csv, write_json
-from .sensitivity import average_baseline_factors, run_scenarios
+from .participation import (
+    daily_rates,
+    estimate_share_response,
+    load_participation,
+    monthly_summary,
+)
+from .sensitivity import (
+    average_baseline_factors,
+    gated_rate_profile,
+    monthly_share_factor,
+    run_scenarios,
+)
 from .schedule import load_schedule
 
 DEFAULT_CONFIG = "config/config.yaml"
@@ -58,7 +70,37 @@ def cmd_plan(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
 
-    md = render_markdown(cfg, schedule, plan, scenarios=scenarios, history=history)
+    share_estimate = None
+    participation_summary = None
+    if history:
+        participation = _load_participation_or_empty(
+            args.participation or cfg.store.participation_file, quiet=True
+        )
+        if participation:
+            participation_summary = []
+            series = []
+            for r in history:
+                summary = monthly_summary(participation, r.year, r.month, r.days)
+                cvr = r.cvr or 0.0
+                participation_summary.append(
+                    dict(key=r.key, cvr=cvr, entry_days=summary.entry_days,
+                         days=summary.days_covered, share=summary.share,
+                         average_rate=summary.average_rate)
+                )
+                series.append((r.key, cvr, summary.share, summary.average_rate))
+            try:
+                share_estimate = estimate_share_response(
+                    series,
+                    reference_advantage=cfg.behavior.reference_advantage,
+                    share_elasticity=cfg.behavior.share_elasticity,
+                )
+            except ValueError:
+                share_estimate = None
+
+    md = render_markdown(
+        cfg, schedule, plan, scenarios=scenarios, history=history,
+        share_estimate=share_estimate, participation_summary=participation_summary,
+    )
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     stem = f"bonus_store_plan_{schedule.month}"
@@ -84,19 +126,29 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 
     if kind == "monthly":
         avg_market, avg_share = 0.0, 1.0  # 0.0 は未指定を示す
+        by_month = None
         if args.schedule:
-            avg_market, avg_share = average_baseline_factors(
-                cfg, load_schedule(args.schedule)
+            schedule = load_schedule(args.schedule)
+            avg_market, avg_share = average_baseline_factors(cfg, schedule)
+            participation = _load_participation_or_empty(
+                args.participation or cfg.store.participation_file
             )
-            print(
-                "実績に含まれる販促イベントの上振れを差し引きます:\n"
-                f"  市場規模係数の平均 {avg_market:.3f}倍（セッション側）\n"
-                f"  シェア係数の平均   {avg_share:.3f}倍（転換率側）\n"
-            )
+            by_month = _share_factor_by_month(cfg, schedule, rows, participation)
+            print("実績に含まれる上振れを差し引きます:")
+            print(f"  市場規模係数の平均 {avg_market:.3f}倍（セッション側）")
+            if participation:
+                lo, hi = min(by_month.values()), max(by_month.values())
+                entered = sum(1 for r in rows
+                              if monthly_summary(participation, r.year, r.month, r.days).entry_days)
+                print(f"  シェア係数（転換率側）は月ごとに {lo:.3f}〜{hi:.3f}倍")
+                print(f"    ボーナスストアPlus参加実績のある月: {entered}/{len(rows)}")
+            else:
+                print(f"  シェア係数の平均   {avg_share:.3f}倍（転換率側・参加履歴なし）")
+            print()
         result = calibrate_monthly(
             rows, cfg.behavior, shrinkage=args.shrinkage,
             today=_today(args.today), average_market_factor=avg_market,
-            average_share_factor=avg_share,
+            average_share_factor=avg_share, share_factor_by_month=by_month,
         )
         params, notes = result.params, result.notes
         _print_monthly_detail(result, rows, cfg)
@@ -162,6 +214,89 @@ def _print_monthly_detail(result, rows, cfg: AppConfig) -> None:
             f"\n  転換率のトレンド: {result.cvr_trend_at[first]:.2%} → "
             f"{result.cvr_trend_at[last]:.2%}（{first} → {last}）"
         )
+
+
+def _share_factor_by_month(cfg, schedule, rows, participation) -> dict[str, float]:
+    """各月の平均シェア係数. 実績に含まれる上振れを差し引くのに使う."""
+    profile = gated_rate_profile(cfg, schedule)
+    out: dict[str, float] = {}
+    for r in rows:
+        own = daily_rates(participation, r.year, r.month, r.days)
+        out[r.key] = monthly_share_factor(cfg, profile, own)
+    return out
+
+
+def _load_participation_or_empty(path, quiet=False) -> dict:
+    if not path:
+        return {}
+    try:
+        return load_participation(path)
+    except FileNotFoundError:
+        if not quiet:
+            print(f"[注意] 参加履歴が見つかりません: {path}", file=sys.stderr)
+        return {}
+
+
+def cmd_participation(args: argparse.Namespace) -> int:
+    """参加履歴の集計と、シェア反応が推定できるかの検証."""
+    cfg = AppConfig.load(args.config, args.behavior)
+    path = args.participation or cfg.store.participation_file
+    if not path:
+        print("エラー: --participation か config の participation_file を指定してください",
+              file=sys.stderr)
+        return 2
+    participation = load_participation(path)
+    kind, rows = load_history(
+        args.history, today=_today(args.today), partial_days=args.partial_days
+    )
+    if kind != "monthly":
+        print("エラー: この検証は月次実績が必要です", file=sys.stderr)
+        return 2
+
+    print(f"参加履歴: {len(participation)}日分")
+    print(f"  {'月':<9}{'CVR':>8}{'参加日':>7}{'日数':>6}{'参加率':>8}{'自社率':>8}")
+    series = []
+    for r in rows:
+        summary = monthly_summary(participation, r.year, r.month, r.days)
+        cvr = r.cvr or 0.0
+        rate = f"{summary.average_rate:.0%}" if summary.entry_days else "-"
+        print(
+            f"  {r.key:<9}{cvr:>8.2%}{summary.entry_days:>7}"
+            f"{summary.days_covered:>6}{summary.share:>8.0%}{rate:>8}"
+        )
+        series.append((r.key, cvr, summary.share, summary.average_rate))
+    print()
+
+    spend = [
+        r.gmv * summary.share * summary.average_rate
+        for r in rows
+        for summary in [monthly_summary(participation, r.year, r.month, r.days)]
+        if summary.entry_days
+    ]
+    if spend:
+        print(f"過去のポイント原資（自社設定分の概算）: 月あたり {statistics.mean(spend):,.0f}円")
+        print(f"  現在の月次予算 {cfg.store.monthly_point_budget:,.0f}円 との比 "
+              f"{cfg.store.monthly_point_budget / statistics.mean(spend):.1f}倍")
+        print()
+
+    print("シェア反応は実測できるか:")
+    try:
+        est = estimate_share_response(
+            series,
+            reference_advantage=cfg.behavior.reference_advantage,
+            share_elasticity=cfg.behavior.share_elasticity,
+        )
+    except ValueError as exc:
+        print(f"  推定できません: {exc}")
+        return 0
+    for line in est.summary_lines():
+        print(f"  {line}")
+    if not est.identifiable:
+        print()
+        print("  → 月次データでは参加の効果とトレンドを分離できない。")
+        print("     日別の注文数・セッション数があれば、参加日と非参加日を")
+        print("     直接比較できるため、これが解ける。")
+    return 0
 
 
 def cmd_orders(args: argparse.Namespace) -> int:
@@ -323,6 +458,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="月次実績CSV. 指定すると前年同月とベースライン予測を突き合わせる",
     )
     sp.add_argument(
+        "--participation", default=None,
+        help="ボーナスストアPlus参加履歴CSV. 既定は config の participation_file",
+    )
+    sp.add_argument(
         "--partial-days", type=int, default=None,
         help="実績CSVの最終月の実日数. 省略時は --today から推定(前日まで)",
     )
@@ -345,6 +484,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="推奨 aov の出力先",
     )
     sc.add_argument(
+        "--participation", default=None,
+        help="ボーナスストアPlus参加履歴CSV. 既定は config の participation_file",
+    )
+    sc.add_argument(
         "--partial-days", type=int, default=None,
         help="最終月の実日数. 省略時は --today から推定(前日まで)",
     )
@@ -353,6 +496,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="月次季節係数の縮小係数(0=仮値のまま, 1=残差をそのまま採用)",
     )
     sc.set_defaults(func=cmd_calibrate)
+
+    spt = sub.add_parser(
+        "participation", parents=[common],
+        help="ボーナスストアPlus参加履歴の集計とシェア反応の推定可能性",
+    )
+    spt.add_argument("--history", required=True, help="月次実績CSV")
+    spt.add_argument("--participation", default=None, help="参加履歴CSV")
+    spt.add_argument("--partial-days", type=int, default=None, help="最終月の実日数")
+    spt.set_defaults(func=cmd_participation)
 
     so = sub.add_parser("orders", parents=[common], help="注文明細の要約と注文下限の効き方")
     so.add_argument("--file", default=None, help="注文明細CSV(金額列). 既定は config の order_values_file")

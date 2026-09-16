@@ -30,7 +30,12 @@ class Scenario:
 
 
 # (名前, 説明, 市場規模の弾力性, 2ポイント優位での注文増加率)
+#
+# 「実測点推定」は、参加履歴と月次実績の回帰から出た点推定値。
+# 統計的には0と区別できず信頼できないが、**下振れの目安**として置く。
+# これでも残る日は、前提がどう外れても実行してよい日になる。
 VARIANTS = (
+    ("実測点推定", "月次回帰の点推定（下振れの目安）", 0.60, 0.06),
     ("弱気", "付与率への反応が想定より鈍い場合", 0.60, 0.12),
     ("既定", "現在の設定", None, None),
     ("強気", "付与率への反応が想定より強い場合", 1.00, 0.30),
@@ -125,3 +130,50 @@ def average_baseline_factors(
 def average_market_factor(cfg: AppConfig, schedule: PromoSchedule) -> float:
     """市場規模係数の平均だけを返す薄いラッパ."""
     return average_baseline_factors(cfg, schedule)[0]
+
+
+def gated_rate_profile(cfg: AppConfig, schedule: PromoSchedule) -> list[float]:
+    """その月の各日の「参加資格つき施策による上乗せ率」.
+
+    ボーナスストアPlus不参加の状態で計算する(プロモーションパッケージ分のみ)。
+    """
+    from .behavior import build_day_context
+    from .economics import rate_by_scope
+
+    part = cfg.store.participation(bonus_store_plus=False)
+    out = []
+    for day in schedule.days():
+        ctx = build_day_context(schedule, day)
+        _mall_wide, gated = rate_by_scope(ctx.benefits, part, cfg.store)
+        out.append(gated)
+    return out
+
+
+def monthly_share_factor(
+    cfg: AppConfig, gated_profile: list[float], own_rates: list[float]
+) -> float:
+    """その月の平均シェア係数.
+
+    実績の転換率には、参加資格つき施策と自社の参加による上振れが
+    すでに含まれている。これで割り戻して「何も上乗せがない日」の
+    水準に引き直す。
+
+    過去の販促カレンダーは残っていないため、**各月も対象月と同じ販促構成
+    だった**と仮定する。さらに、販促日と自社の参加日の重なり方は分からないため、
+    **両者は独立**と見なして掛け合わせる。
+    """
+    from .behavior import DemandModel
+
+    if not gated_profile or not own_rates:
+        return 1.0
+    model = DemandModel(cfg.behavior, cfg.store)
+    dist = cfg.store.distribution
+    cap = cfg.store.point_cap_per_order
+    # 自社設定率は実効値に直す(注文下限は無いが1注文あたり上限はかかる)
+    own_effective = {r: (dist.expected_rate(r, 0.0, cap) if r > 0 else 0.0)
+                     for r in set(own_rates)}
+    total = 0.0
+    for g in gated_profile:
+        for r in own_rates:
+            total += model.share_factor(g + own_effective[r])
+    return total / (len(gated_profile) * len(own_rates))
