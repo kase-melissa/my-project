@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import date
 from pathlib import Path
@@ -11,6 +12,7 @@ import yaml
 
 from .calibrate import calibrate_daily, calibrate_monthly, load_history
 from .config import AppConfig
+from .distribution import EmpiricalDistribution, load_order_values
 from .optimizer import OBJECTIVES, optimize
 from .planner import build_entry_units
 from .report import render_html, render_markdown, write_csv, write_json
@@ -162,6 +164,95 @@ def _print_monthly_detail(result, rows, cfg: AppConfig) -> None:
         )
 
 
+def cmd_orders(args: argparse.Namespace) -> int:
+    """注文明細の要約を出す. 注文下限がどれだけ効くかを確認する."""
+    cfg = AppConfig.load(args.config, args.behavior)
+    path = args.file or cfg.store.order_values_file
+    if not path:
+        print(
+            "エラー: 注文明細のパスを --file か config の order_values_file で指定してください",
+            file=sys.stderr,
+        )
+        return 2
+    dist = EmpiricalDistribution(load_order_values(path), label=Path(path).name)
+    schedule = load_schedule(args.schedule) if args.schedule else None
+
+    print(f"注文明細: {dist.source}")
+    print(f"  平均 {dist.mean:,.0f}円 / 中央値 {dist.quantile(0.5):,.0f}円 "
+          f"/ 対数標準偏差 {dist.log_sigma():.3f}")
+    print(
+        "  分位点 "
+        + "  ".join(
+            f"{int(q*100)}%={dist.quantile(q):,.0f}"
+            for q in (0.1, 0.25, 0.5, 0.75, 0.9, 0.99)
+        )
+    )
+    print()
+
+    if schedule:
+        print("販促カレンダーの各施策が、この分布でどれだけ効くか:")
+        print(f"  {'施策':<30}{'表示':>8}{'注文下限':>9}{'該当率':>8}{'実効率':>9}")
+        print("  ※ 段階付与は注文ごとに段を判定。注文下限欄は最下段のしきい値")
+        for b in schedule.benefits:
+            if b.coupon_yen > 0:
+                eff = dist.expected_coupon_rate(b.coupon_yen, b.min_order_yen)
+                shown = f"{b.coupon_yen:,.0f}円"
+                floor = b.min_order_yen
+            elif b.tiers:
+                eff = dist.expected_tiered_rate(b.tiers, b.user_cap_yen)
+                shown = "/".join(f"{r:.0%}" for _t, r in sorted(b.tiers))
+                floor = sorted(b.tiers)[0][0]
+            else:
+                eff = dist.expected_rate(b.rate, b.min_order_yen, b.user_cap_yen)
+                shown = f"{b.rate:.0%}"
+                floor = b.min_order_yen
+            share = dist.qualifying_share(floor)
+            print(
+                f"  {b.name:<28}{shown:>8}{floor:>9,.0f}"
+                f"{share:>8.0%}{eff:>9.2%}"
+            )
+        print()
+
+    thresholds = _threshold_list(schedule)
+    print("注文下限の「あと一歩」— まとめ買い誘導やセット設計で越えられるか:")
+    for t in thresholds:
+        nm = dist.near_miss(t)
+        if not nm["count"]:
+            continue
+        print(
+            f"  下限 {t:,.0f}円（該当 {nm['qualifying_share']:.0%}）: "
+            f"{nm['floor']:,.0f}〜{t:,.0f}円 に {nm['count']:,}件"
+        )
+        for c in nm["clusters"][:3]:
+            print(
+                f"      {c['price']:>9,.0f}円 x {c['count']:>4}件"
+                f"（あと {c['gap']:,.0f}円）"
+            )
+    print()
+
+    if args.profile_out:
+        out = Path(args.profile_out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps(dist.profile(tuple(thresholds)), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"要約統計を書き出しました: {out}")
+        print("  明細そのものが無くても、この要約で再現・レビューできます")
+    return 0
+
+
+def _threshold_list(schedule) -> list[float]:
+    """カレンダーに出てくる注文下限を重複なく拾う."""
+    if schedule is None:
+        return [3000.0, 5000.0, 20000.0, 25000.0]
+    found = {b.min_order_yen for b in schedule.benefits if b.min_order_yen > 0}
+    for b in schedule.benefits:
+        for threshold, _rate in b.tiers:
+            found.add(threshold)
+    return sorted(found)
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """販促スケジュールの検証と、エントリー締切の一覧表示."""
     cfg = AppConfig.load(args.config, args.behavior)
@@ -262,6 +353,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="月次季節係数の縮小係数(0=仮値のまま, 1=残差をそのまま採用)",
     )
     sc.set_defaults(func=cmd_calibrate)
+
+    so = sub.add_parser("orders", parents=[common], help="注文明細の要約と注文下限の効き方")
+    so.add_argument("--file", default=None, help="注文明細CSV(金額列). 既定は config の order_values_file")
+    so.add_argument("--schedule", default=None, help="販促スケジュールYAML(施策別の実効率を出す)")
+    so.add_argument("--profile-out", default=None, help="要約統計のJSON出力先")
+    so.set_defaults(func=cmd_orders)
 
     sk = sub.add_parser("check", parents=[common], help="スケジュール検証と締切一覧")
     sk.add_argument("--schedule", required=True, help="該当月の販促スケジュールYAML")

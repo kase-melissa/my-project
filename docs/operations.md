@@ -224,12 +224,27 @@ market_elasticity = ln(5のつく日の伸び倍率) / ln(11% / 7%)
 | `point_cap_per_order` | ストアクリエイターProのボーナスストア設定画面 |
 | `monthly_point_budget` | 販促予算のうちポイント原資に充てる額 |
 
-`aov_sigma`（注文単価のばらつき）は注文明細から推定する:
+### 注文明細（注文下限の効き方）
 
-```python
-from bonus_planner.calibrate import estimate_aov_sigma
-print(estimate_aov_sigma([12800, 24800, 9800, ...]))  # 30件以上必要
+`data/order_values.csv` に金額列（`total_price`）を置く。
+ストアクリエイターProの受注明細から `TotalPrice` 列だけ抜き出せばよい。
+
+```bash
+python3 -m bonus_planner orders \
+    --file data/order_values.csv \
+    --schedule data/promo_schedule/2026-10.yaml \
+    --profile-out data/order_value_profile.json
 ```
+
+施策ごとの該当率・実効付与率と、注文下限の「あと一歩」分析が出る。
+
+明細はリポジトリに置かない（`.gitignore`）。代わりに要約統計を
+`data/order_value_profile.json` に書き出してコミットする。
+これがあれば明細そのものが無くても分布の妥当性をレビューできる。
+
+明細を置くと `config.yaml` の `order_values_file` 経由で自動的に
+実効付与率の計算に使われる。無い場合は `aov_sigma` による対数正規近似に
+フォールバックするが、SKU価格に張り付いた分布では誤差が大きい。
 
 `config/behavior_priors.yaml`（行動モデル）のうち `base_sessions`・`base_cvr`・`month` は
 `calibrate` の出力を使う。手で触るのは弾力性まわりだけ。

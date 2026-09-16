@@ -6,3 +6,7 @@ __pycache__/
 out/
 config/behavior_calibrated.yaml
 config/store_suggested.yaml
+
+# 注文明細(金額のみ)。粒度が細かいためリポジトリには置かない。
+# 代わりに data/order_value_profile.json に要約統計を置く。
+data/order_values.csv

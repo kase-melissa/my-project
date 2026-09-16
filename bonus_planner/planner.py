@@ -13,7 +13,6 @@ from .behavior import DemandModel, build_day_context
 from .calendar_rules import format_day
 from .config import AppConfig
 from .economics import (
-    expected_benefit_rate,
     perceived_total_rate,
     point_cost,
     store_funded_rate,
@@ -61,8 +60,8 @@ def estimate_day(
     base_part = store.participation(bonus_store_plus=False)
     entry_part = store.participation(bonus_store_plus=True)
 
-    own_effective = expected_benefit_rate(
-        own_rate, store.aov, store.aov_sigma, 0.0, store.point_cap_per_order
+    own_effective = store.distribution.expected_rate(
+        own_rate, 0.0, store.point_cap_per_order
     )
 
     base_total = perceived_total_rate(ctx.benefits, base_part, store)

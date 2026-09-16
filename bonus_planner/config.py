@@ -28,8 +28,14 @@ class StoreConfig:
 
     store_name: str = "ストア"
     gross_margin_rate: float = 0.32
+
+    # 注文単価の水準。GMV の計算に使う(月次実績から校正する)。
     aov: float = 19800.0
+    # 注文単価のばらつき。order_values_file が無いときのフォールバック用。
     aov_sigma: float = 0.55
+    # 注文明細(金額列)のパス。あれば実測分布を使う。
+    # 注文下限・付与上限の効き方は分布の形で決まるため、明細があるほうが正確。
+    order_values_file: str | None = None
     point_cap_per_order: float = 5000.0
     point_fee_rate: float = 0.0
     monthly_point_budget: float = 500000.0
@@ -71,6 +77,26 @@ class StoreConfig:
             raise ValueError("store_bonus_rates が空です")
         if any(r < 0 for r in self.store_bonus_rates):
             raise ValueError("store_bonus_rates に負の値があります")
+
+    @property
+    def distribution(self):
+        """注文単価分布. 明細があれば実測、無ければ対数正規で近似する.
+
+        1度作ったら使い回す。プランナーが日 x 還元率 x 施策の回数だけ
+        期待付与率を問い合わせるため、毎回読み直すと遅い。
+        """
+        cached = getattr(self, "_distribution", None)
+        if cached is None:
+            from .distribution import build_distribution
+
+            cached = build_distribution(self.order_values_file, self.aov, self.aov_sigma)
+            object.__setattr__(self, "_distribution", cached)
+        return cached
+
+    def reset_distribution(self) -> None:
+        """aov などを書き換えたあとに分布を作り直す."""
+        if hasattr(self, "_distribution"):
+            object.__delattr__(self, "_distribution")
 
     def participation(self, bonus_store_plus: bool) -> Participation:
         return Participation(

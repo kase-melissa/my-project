@@ -77,9 +77,84 @@ def render_markdown(
     L += _section_sensitivity(scenarios)
     L += _section_validation(cfg, schedule, plan, history)
     L += _section_daily_rates(cfg, schedule, plan)
+    L += _section_order_thresholds(cfg, schedule)
     L += _section_notes(schedule)
     L += _section_breakeven(cfg)
     return "\n".join(L)
+
+
+def _section_order_thresholds(cfg: AppConfig, schedule: PromoSchedule) -> list[str]:
+    """注文下限がどれだけ効いているかと、下限直下の注文の厚み.
+
+    日程選択とは別の論点(価格・セット設計)なので、参考情報として分ける。
+    """
+    dist = cfg.store.distribution
+    if not hasattr(dist, "near_miss"):
+        return []
+
+    L = ["## 10. 参考: 注文下限による目減りと、価格・セット設計の余地", ""]
+    L.append(
+        "販促カレンダーの注文下限は3,000〜25,000円に設定されている。"
+        f"実測の平均注文単価は{_yen(dist.mean)}で、下限がこの近辺にあるため"
+        "表示付与率のとおりには効かない。"
+    )
+    L.append("")
+    L.append("| 施策 | 表示 | 注文下限 | 該当率 | 実効率 |")
+    L.append("|---|---:|---:|---:|---:|")
+    for b in schedule.benefits:
+        if b.coupon_yen > 0:
+            eff = dist.expected_coupon_rate(b.coupon_yen, b.min_order_yen)
+            shown, floor = f"{b.coupon_yen:,.0f}円", b.min_order_yen
+        elif b.tiers:
+            eff = dist.expected_tiered_rate(b.tiers, b.user_cap_yen)
+            shown = "/".join(f"{r:.0%}" for _t, r in sorted(b.tiers))
+            floor = sorted(b.tiers)[0][0]
+        else:
+            eff = dist.expected_rate(b.rate, b.min_order_yen, b.user_cap_yen)
+            shown, floor = f"{b.rate:.0%}", b.min_order_yen
+        if floor <= 0:
+            continue
+        L.append(
+            f"| {b.name} | {shown} | {floor:,.0f}円 | "
+            f"{dist.qualifying_share(floor):.0%} | {eff:.2%} |"
+        )
+    L.append("")
+
+    thresholds = sorted(
+        {b.min_order_yen for b in schedule.benefits if b.min_order_yen > 0}
+        | {t for b in schedule.benefits for t, _r in b.tiers}
+    )
+    L.append("### 注文下限の「あと一歩」")
+    L.append("")
+    L.append(
+        "下限をわずかに下回る注文がどれだけあるか。"
+        "まとめ買い誘導やセット設計で下限を越えられれば、そのぶん付与率が上がる。"
+    )
+    L.append("")
+    rows = 0
+    for t in thresholds:
+        nm = dist.near_miss(t)
+        if not nm["count"]:
+            continue
+        rows += 1
+        L.append(
+            f"- **下限 {t:,.0f}円**（該当 {nm['qualifying_share']:.0%}）: "
+            f"{nm['floor']:,.0f}〜{t:,.0f}円 に **{nm['count']:,}件**"
+        )
+        for c in nm["clusters"][:3]:
+            L.append(
+                f"    - {c['price']:,.0f}円 × {c['count']:,}件"
+                f"（あと **{c['gap']:,.0f}円**）"
+            )
+    if not rows:
+        L.append("下限直下に目立つ注文はありません。")
+    L.append("")
+    L.append(
+        "> これはエントリー日程とは別の施策。同梱・セット販売・送料無料ラインの"
+        "見直しで下限を越えられれば、どの日にエントリーしても効果が上がる。"
+    )
+    L.append("")
+    return L
 
 
 def _section_sensitivity(scenarios: list | None) -> list[str]:
@@ -242,7 +317,8 @@ def _section_assumptions(cfg: AppConfig, schedule: PromoSchedule, plan: PlanResu
         "自社原資はストアポイント1%＋自社設定率のみ |"
     )
     L.append(f"| 粗利率 | {store.gross_margin_rate:.0%} |")
-    L.append(f"| 平均注文単価 | {_yen(store.aov)}（対数標準偏差 {store.aov_sigma}） |")
+    L.append(f"| 平均注文単価（水準） | {_yen(store.aov)} |")
+    L.append(f"| 注文単価の分布 | {store.distribution.source} |")
     L.append(f"| 1注文あたり付与上限 | {_yen(store.point_cap_per_order)} |")
     L.append("")
     L.append("### 係数の校正状況")
@@ -282,7 +358,13 @@ def _section_assumptions(cfg: AppConfig, schedule: PromoSchedule, plan: PlanResu
         "| シェアの反応 `share_gain_at_reference` | "
         "**初期仮値**（日次データ＋エントリー記録が必要） |"
     )
-    L.append("| 注文単価のばらつき `aov_sigma` | **初期仮値**（注文明細が必要） |")
+    if store.distribution.count:
+        L.append(
+            f"| 注文単価の分布 | **実測 {store.distribution.count:,}件**"
+            "（対数正規の近似ではなく実測分布を使用） |"
+        )
+    else:
+        L.append("| 注文単価のばらつき `aov_sigma` | **初期仮値**（注文明細が必要） |")
     L.append("")
     L.append(
         "> **金額の絶対値は目安として扱うこと。** 未校正の係数が残っているため、"
@@ -491,7 +573,7 @@ def _section_daily_rates(cfg: AppConfig, schedule: PromoSchedule, plan: PlanResu
 def _section_notes(schedule: PromoSchedule) -> list[str]:
     if not schedule.notes:
         return []
-    L = ["## 10. 運用上の注意", ""]
+    L = ["## 11. 運用上の注意", ""]
     for n in schedule.notes:
         if n.days:
             days = "、".join(format_day(d) for d in n.days)
@@ -504,7 +586,7 @@ def _section_notes(schedule: PromoSchedule) -> list[str]:
 
 def _section_breakeven(cfg: AppConfig) -> list[str]:
     store = cfg.store
-    L = ["## 11. 損益分岐の目安", ""]
+    L = ["## 12. 損益分岐の目安", ""]
     L.append(
         f"粗利率{store.gross_margin_rate:.0%}・平均単価{_yen(store.aov)}・"
         f"1注文あたり上限{_yen(store.point_cap_per_order)}の前提で、"
