@@ -15,7 +15,7 @@ from bonus_planner.participation import (
     monthly_summary,
 )
 from bonus_planner.schedule import load_schedule
-from bonus_planner.sensitivity import gated_rate_profile, monthly_share_factor
+from bonus_planner.sensitivity import gated_rate_profile, monthly_cvr_factor
 
 ROOT = Path(__file__).resolve().parent.parent
 HISTORY = ROOT / "data" / "bsplus_participation.csv"
@@ -106,7 +106,7 @@ class TestMonthlySummary(unittest.TestCase):
         self.assertEqual(rates[0], 0.0)
 
 
-class TestMonthlyShareFactor(unittest.TestCase):
+class TestMonthlyCvrFactor(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cfg = AppConfig.load(CONFIG, BEHAVIOR)
@@ -114,34 +114,55 @@ class TestMonthlyShareFactor(unittest.TestCase):
         cls.profile = gated_rate_profile(cls.cfg, cls.schedule)
         cls.p = load_participation(HISTORY)
 
-    def test_profile_has_one_value_per_day(self):
+    def test_profile_has_one_pair_per_day(self):
         self.assertEqual(len(self.profile), len(self.schedule.days()))
-        self.assertTrue(any(g > 0 for g in self.profile))
+        # 全ストア共通の付与率は毎日ある。参加資格つきは一部の日だけ。
+        self.assertTrue(all(mall_wide > 0 for mall_wide, _ in self.profile))
+        self.assertTrue(any(gated > 0 for _, gated in self.profile))
 
     def test_participation_raises_the_factor(self):
         """参加した月は、参加していない月より補正係数が大きい."""
-        without = monthly_share_factor(
+        without = monthly_cvr_factor(
             self.cfg, self.profile, daily_rates(self.p, 2025, 10)
         )
-        with_part = monthly_share_factor(
+        with_part = monthly_cvr_factor(
             self.cfg, self.profile, daily_rates(self.p, 2026, 6)
         )
         self.assertGreater(with_part, without)
         self.assertGreater(without, 1.0)  # プロモパッケージ分で1を超える
 
-    def test_no_participation_matches_gated_only(self):
-        factor = monthly_share_factor(self.cfg, self.profile, [0.0] * 31)
+    def test_no_participation_matches_intent_times_gated(self):
+        from bonus_planner.behavior import DemandModel
+
+        model = DemandModel(self.cfg.behavior, self.cfg.store)
+        factor = monthly_cvr_factor(self.cfg, self.profile, [0.0] * 31)
         expected = sum(
-            __import__("bonus_planner.behavior", fromlist=["DemandModel"])
-            .DemandModel(self.cfg.behavior, self.cfg.store)
-            .share_factor(g)
-            for g in self.profile
+            model.intent_factor(mall_wide) * model.share_factor(gated)
+            for mall_wide, gated in self.profile
         ) / len(self.profile)
         self.assertAlmostEqual(factor, expected, places=10)
 
+    def test_intent_channel_raises_the_factor(self):
+        """来訪意欲を入れると補正係数が上がる.
+
+        入れないと実績の転換率から差し引く量が足りず、base_cvr が過大になる。
+        """
+        from dataclasses import replace
+
+        from bonus_planner.config import AppConfig
+
+        flat = AppConfig(
+            store=self.cfg.store,
+            behavior=replace(self.cfg.behavior, intent_elasticity=0.0),
+        )
+        self.assertGreater(
+            monthly_cvr_factor(self.cfg, self.profile, [0.0] * 31),
+            monthly_cvr_factor(flat, self.profile, [0.0] * 31),
+        )
+
     def test_empty_inputs_are_neutral(self):
-        self.assertEqual(monthly_share_factor(self.cfg, [], [0.0]), 1.0)
-        self.assertEqual(monthly_share_factor(self.cfg, self.profile, []), 1.0)
+        self.assertEqual(monthly_cvr_factor(self.cfg, [], [0.0]), 1.0)
+        self.assertEqual(monthly_cvr_factor(self.cfg, self.profile, []), 1.0)
 
 
 class TestShareResponseEstimate(unittest.TestCase):

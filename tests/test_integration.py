@@ -135,8 +135,26 @@ class TestPlanInvariants(unittest.TestCase):
             self.assertIn(d, decided, f"{d} が未判断")
 
     def test_selected_meet_roas_floor(self):
-        for _u, opt in self.plan.selected:
+        """ROAS下限を下回って選ばれるのは、必須指定の日だけ."""
+        for u, opt in self.plan.selected:
+            if u.mandatory:
+                continue
             self.assertGreaterEqual(opt.roas, self.cfg.store.min_roas)
+
+    def test_mandatory_units_are_selected_even_below_roas_floor(self):
+        """必須指定は採算基準を下回っても選ばれ、自社率は最小に抑えられる."""
+        mandatory = [(u, o) for u, o in self.plan.selected if u.mandatory]
+        if not self.cfg.store.mandatory_benefit_ids:
+            self.skipTest("必須指定なし")
+        self.assertTrue(mandatory, "必須指定が1件も選ばれていない")
+        cheapest = min(self.cfg.store.store_bonus_rates)
+        for _u, o in mandatory:
+            if o.roas < self.cfg.store.min_roas:
+                self.assertAlmostEqual(o.store_rate, cheapest)
+
+    def test_mandatory_units_are_never_rejected(self):
+        for u, _o, _r in self.plan.rejected:
+            self.assertFalse(u.mandatory, f"{u.label} が必須指定なのに見送られている")
 
     def test_no_day_selected_twice(self):
         days = [d for u, _ in self.plan.selected for d in u.days]
@@ -198,9 +216,31 @@ class TestReport(unittest.TestCase):
             ),
         )
         md = render_markdown(calibrated, self.schedule, self.plan)
-        self.assertIn("| 基準セッション数 `base_sessions` | **実測で校正済み** |", md)
-        self.assertIn("| 基準転換率 `base_cvr` | **実測で校正済み** |", md)
-        self.assertIn("| 曜日係数 | **初期仮値**", md)
+        self.assertIn("| 基準セッション数 `base_sessions` | **月次実績で校正済み** |", md)
+        self.assertIn("| 基準転換率 `base_cvr` | **月次実績で校正済み** |", md)
+        # 月次だけでは曜日係数は測れない
+        self.assertIn("| 曜日係数 | 初期仮値（日次データが必要）", md)
+
+    def test_calibration_status_marks_daily_calibrated_coefficients(self):
+        """日別で校正すると、曜日係数と弾力性が「校正済み」に変わること."""
+        from dataclasses import replace
+
+        calibrated = AppConfig(
+            store=self.cfg.store,
+            behavior=replace(
+                self.cfg.behavior,
+                calibration_note=(
+                    "月次実績13ヶ月(2025-09〜2026-09)で校正 / "
+                    "日別実績(2026-06-16〜09-15・92日)で校正"
+                ),
+            ),
+        )
+        md = render_markdown(calibrated, self.schedule, self.plan)
+        self.assertIn("| 曜日係数 | **日別実績で校正済み**", md)
+        self.assertIn("| 給料日サイクル係数 | **日別実績で校正済み**", md)
+        self.assertIn(
+            "| 来訪意欲の弾力性 `intent_elasticity` | **日別実績で校正済み**", md
+        )
 
     def test_states_funding_assumption(self):
         self.assertIn("モール負担", self.md)

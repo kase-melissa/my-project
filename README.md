@@ -42,19 +42,27 @@ pip install pyyaml
 # 1. 販促カレンダーの検証と締切一覧
 python3 -m bonus_planner check --schedule data/promo_schedule/2026-10.yaml
 
-# 2. 実績から行動モデルを校正（--schedule は必須級。理由は後述）
+# 2. 日別実績から係数を推定（結果は behavior_priors.yaml に転記する）
+#    曜日係数・給料日サイクル係数・弾力性は日別でないと測れない
+python3 tools/analyze_daily.py \
+    --daily data/sales_history_daily.csv \
+    --participation data/bsplus_participation.csv
+
+# 3. 月次実績から水準と季節性を校正（--schedule は必須級。理由は後述）
 #    ストアクリエイターProのエクスポートをそのまま渡せる（CP932のままでよい）
 python3 -m bonus_planner calibrate \
     --history data/sales_history_monthly.csv \
+    --participation data/bsplus_participation.csv \
     --schedule data/promo_schedule/2026-10.yaml \
     --today 2026-09-16 --partial-days 14 \
     --out config/behavior_calibrated.yaml
 
-# 3. エントリー日程を提案させる
+# 4. エントリー日程を提案させる
 python3 -m bonus_planner plan \
     --schedule data/promo_schedule/2026-10.yaml \
     --behavior config/behavior_calibrated.yaml \
     --history data/sales_history_monthly.csv \
+    --participation data/bsplus_participation.csv \
     --today 2026-09-16 --partial-days 14
 ```
 
@@ -173,10 +181,11 @@ bonus_planner/
   cli.py             CLI
 config/
   config.yaml              自社の経済条件と参加状態
-  behavior_priors.yaml     行動モデルの初期仮値
+  behavior_priors.yaml     行動モデルの係数（日別実績で校正済み）
 data/
   promo_schedule/2026-10.yaml       2026年10月カレンダーの転記
-  sales_history_monthly.csv         実績（ストアクリエイターProのエクスポート）
+  sales_history_monthly.csv         月次実績（ストアクリエイターProのエクスポート）
+  sales_history_daily.csv           日別実績（同上・3ヶ月しか遡れないので貯めること）
   order_values.csv                  注文明細の金額列（gitignore）
   order_value_profile.json          注文単価分布の要約統計
   bsplus_participation.csv          ボーナスストアPlus参加履歴
@@ -185,6 +194,7 @@ docs/
   model.md           モデル仕様（係数を触る前に読む）
   operations.md      月次運用手順
 tools/
+  analyze_daily.py                日別実績から係数を推定
   make_sample_monthly_history.py  合成データ生成（実データではない）
 ```
 

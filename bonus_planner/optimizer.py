@@ -68,16 +68,21 @@ def optimize(
         if unit.blocked_reason is not None:
             continue
         ok, ng = _viable_options(cfg, unit)
+        if unit.mandatory:
+            # 必須指定は採算に関わらず先に確保し、残予算で他を最適化する。
+            # ROAS下限や純増効果の基準を満たす案が無くても、
+            # 増分GMVが見込める案があるならその中で最も安いものを採る
+            # (「入ること」自体が目的で、自社上乗せは最小限にしたい)。
+            pool = ok or [o for o, _why in ng if o.incremental_gmv > 0]
+            if pool:
+                opt = _best(pool, objective) if ok else min(pool, key=lambda o: o.cost)
+                selected.append((unit, opt))
+                budget -= opt.cost
+                continue
         if not ok:
             if ng:
                 best_rejected = max(ng, key=lambda t: t[0].objective_value(objective))
                 rejected.append((unit, best_rejected[0], best_rejected[1]))
-            continue
-        if unit.mandatory:
-            # 必須指定は採算に関わらず先に確保し、残予算で他を最適化する
-            opt = _best(ok, objective)
-            selected.append((unit, opt))
-            budget -= opt.cost
             continue
         candidates.append((unit, ok))
 

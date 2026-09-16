@@ -391,9 +391,12 @@ def calibrate_monthly(
         for r in rows:
             cvr_at[r.key] = round(r.cvr, 5)
 
-        # 実績の転換率には、参加資格つき施策と自社のボーナスストアPlus参加に
-        # よる上振れがすでに含まれている。モデルはこれをシェア係数で作るため、
-        # 補正しないと同じ効果を二度乗せることになる(集客側と同じ構造)。
+        # 実績の転換率には3つの上振れがすでに含まれている。
+        #   全ストア共通の付与率が上がる日の来訪者の質(来訪意欲)
+        #   参加資格つき施策(プロモーションパッケージ)による優位
+        #   自社がボーナスストアPlusに参加した日の上乗せ
+        # モデルはこれを来訪意欲係数とシェア係数で作るため、補正しないと
+        # 同じ効果を二度乗せることになる(集客側と同じ構造)。
         #
         # 参加が途中の月から始まっている場合、トレンドを当ててから定数で割ると
         # 参加による段差をトレンドとして吸収してしまう。
@@ -406,7 +409,7 @@ def calibrate_monthly(
             base_cvr = cvr_trend_at[keys[-1]]
             used = [share_factor_by_month.get(k, 1.0) for k in cvr_at]
             notes.append(
-                f"参加資格つき施策と自社参加による転換率の上振れを月ごとに"
+                f"来訪意欲・参加資格つき施策・自社参加による転換率の上振れを月ごとに"
                 f"差し引きました(補正係数 {min(used):.3f}〜{max(used):.3f})"
             )
         else:
@@ -416,7 +419,7 @@ def calibrate_monthly(
                 base_cvr /= average_share_factor
                 if abs(average_share_factor - 1.0) > 0.01:
                     notes.append(
-                        f"参加資格つき施策による転換率の上振れ"
+                        f"来訪意欲と参加資格つき施策による転換率の上振れ"
                         f"(平均{average_share_factor:.3f}倍)を実績から差し引きました"
                     )
         base_sessions = level
@@ -433,10 +436,19 @@ def calibrate_monthly(
     span = f"{rows[0].key}〜{rows[-1].key}"
     basis_ja = "セッションと転換率を分離して" if has_sessions else "注文数ベースで"
     note = (
-        f"月次実績{len(rows)}ヶ月({span})を{basis_ja}校正。"
-        "base_sessions・base_cvr・月次季節係数のみ実測。"
-        "曜日係数・給料日サイクル係数・市場規模とシェアの弾力性・aov_sigma は未校正(仮値)"
+        f"月次実績{len(rows)}ヶ月({span})を{basis_ja}校正 → "
+        "base_sessions・base_cvr・月次季節係数"
     )
+    # 曜日係数などは日別実績から入れる。月次校正はそこには触らないので、
+    # 元の note に残っている出どころを引き継ぐ。
+    carried = prior.calibration_note.strip()
+    if carried and "未キャリブレーション" not in carried:
+        note += f" / {carried}"
+    else:
+        note += (
+            " / 曜日係数・給料日サイクル係数・市場規模と来訪意欲とシェアの弾力性・"
+            "aov_sigma は未校正(仮値)"
+        )
     if notes:
         note += " / " + " / ".join(notes)
 

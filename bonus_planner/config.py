@@ -140,9 +140,16 @@ class BehaviorParams:
     # 市場規模の弾力性(全ストア共通の付与率に対する比率反応):
     #   全ストア共通の付与率が上がると、モール全体の来訪者が増える。
     #   競合も同条件なので自社のシェアは変わらず、パイだけが大きくなる。
-    #   既定 0.9 は「5のつく日(7%→11%)で来訪が約1.5倍」に合わせた値。
-    #   自社の実績でこの倍率が分かれば、そこから逆算して設定し直すこと。
-    market_elasticity: float = 0.90
+    #   日別実績では 5のつく日(7%→11%)でセッションが +63%、
+    #   弾力性換算で 1.08 ± 0.16。モデルの上限である 1.0 を既定とする。
+    market_elasticity: float = 1.00
+
+    # 来訪意欲の弾力性(全ストア共通の付与率に対する比率反応):
+    #   全ストア共通の付与率が上がる日は、来訪者の「質」も変わる。
+    #   「5のつく日を待って買う」層が動くため、同じ1セッションあたりの
+    #   購買確率が上がる。人が増えるだけではない。
+    #   市場規模とは別経路なので、転換率側に掛ける。
+    intent_elasticity: float = 1.12
 
     # シェアの反応: 競合に対する付与率の「絶対差」で決まる。
     #   顧客から見た上乗せ2ポイント分の価値は、その日の基準率が7%でも11%でも
@@ -181,6 +188,8 @@ class BehaviorParams:
             raise ValueError("baseline_rate は正の数である必要があります")
         if not 0 < self.market_elasticity <= 1:
             raise ValueError("market_elasticity は0より大きく1以下である必要があります")
+        if self.intent_elasticity < 0:
+            raise ValueError("intent_elasticity は0以上である必要があります")
         if not 0 < self.share_elasticity <= 1:
             raise ValueError("share_elasticity は0より大きく1以下である必要があります")
         if self.reference_advantage <= 0:

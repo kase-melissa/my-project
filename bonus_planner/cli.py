@@ -26,7 +26,7 @@ from .participation import (
 from .sensitivity import (
     average_baseline_factors,
     gated_rate_profile,
-    monthly_share_factor,
+    monthly_cvr_factor,
     run_scenarios,
 )
 from .schedule import load_schedule
@@ -140,10 +140,10 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
                 lo, hi = min(by_month.values()), max(by_month.values())
                 entered = sum(1 for r in rows
                               if monthly_summary(participation, r.year, r.month, r.days).entry_days)
-                print(f"  シェア係数（転換率側）は月ごとに {lo:.3f}〜{hi:.3f}倍")
+                print(f"  転換率係数（来訪意欲×シェア）は月ごとに {lo:.3f}〜{hi:.3f}倍")
                 print(f"    ボーナスストアPlus参加実績のある月: {entered}/{len(rows)}")
             else:
-                print(f"  シェア係数の平均   {avg_share:.3f}倍（転換率側・参加履歴なし）")
+                print(f"  転換率係数の平均   {avg_share:.3f}倍（転換率側・参加履歴なし）")
             print()
         result = calibrate_monthly(
             rows, cfg.behavior, shrinkage=args.shrinkage,
@@ -217,12 +217,12 @@ def _print_monthly_detail(result, rows, cfg: AppConfig) -> None:
 
 
 def _share_factor_by_month(cfg, schedule, rows, participation) -> dict[str, float]:
-    """各月の平均シェア係数. 実績に含まれる上振れを差し引くのに使う."""
+    """各月の平均転換率係数. 実績に含まれる上振れを差し引くのに使う."""
     profile = gated_rate_profile(cfg, schedule)
     out: dict[str, float] = {}
     for r in rows:
         own = daily_rates(participation, r.year, r.month, r.days)
-        out[r.key] = monthly_share_factor(cfg, profile, own)
+        out[r.key] = monthly_cvr_factor(cfg, profile, own)
     return out
 
 

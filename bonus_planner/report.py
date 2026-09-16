@@ -76,8 +76,9 @@ def render_markdown(
     L += _section_calendar(cfg, schedule, plan)
     L += _section_detail(cfg, schedule, plan)
     L += _section_rejected(plan)
+    L += _section_mandatory(cfg, schedule, plan)
     L += _section_validation(cfg, schedule, plan, history)
-    L += _section_share_estimate(share_estimate, participation_summary)
+    L += _section_share_estimate(share_estimate, participation_summary, cfg.behavior)
     L += _section_sensitivity(scenarios)
     L += _section_daily_rates(cfg, schedule, plan)
     L += _section_order_thresholds(cfg, schedule)
@@ -90,15 +91,22 @@ def _section_order_thresholds(cfg: AppConfig, schedule: PromoSchedule) -> list[s
     """注文下限がどれだけ効いているかと、下限直下の注文の厚み.
 
     日程選択とは別の論点(価格・セット設計)なので、参考情報として分ける。
+    ここで**エントリー日程の判断は変わらない**。実効率はすでに
+    本文のすべての数値に織り込み済みで、読者が追加で何かをする必要はない。
     """
     dist = cfg.store.distribution
     if not hasattr(dist, "near_miss"):
         return []
 
-    L = ["## 12. 参考: 注文下限による目減りと、価格・セット設計の余地", ""]
+    L = ["## 12. 参考: 注文下限の効き方", ""]
     L.append(
-        "販促カレンダーの注文下限は3,000〜25,000円に設定されている。"
-        f"実測の平均注文単価は{_yen(dist.mean)}で、下限がこの近辺にあるため"
+        "**エントリー日程の判断には影響しない参考情報。** 下限の効き方は"
+        "本文のすべての数値にすでに織り込んである（表示付与率ではなく"
+        "実測分布から計算した実効率を使っている）。読み飛ばしてよい。"
+    )
+    L.append("")
+    L.append(
+        f"実測の平均注文単価は{_yen(dist.mean)}。下限がこの近辺にあるため、"
         "表示付与率のとおりには効かない。"
     )
     L.append("")
@@ -127,7 +135,7 @@ def _section_order_thresholds(cfg: AppConfig, schedule: PromoSchedule) -> list[s
         {b.min_order_yen for b in schedule.benefits if b.min_order_yen > 0}
         | {t for b in schedule.benefits for t, _r in b.tiers}
     )
-    L.append("### 注文下限の「あと一歩」")
+    L.append("<details><summary>下限の「あと一歩」の注文（価格・セット設計の材料）</summary>")
     L.append("")
     L.append(
         "下限をわずかに下回る注文がどれだけあるか。"
@@ -157,6 +165,8 @@ def _section_order_thresholds(cfg: AppConfig, schedule: PromoSchedule) -> list[s
         "見直しで下限を越えられれば、どの日にエントリーしても効果が上がる。"
     )
     L.append("")
+    L.append("</details>")
+    L.append("")
     return L
 
 
@@ -168,8 +178,8 @@ def _section_sensitivity(scenarios: list | None) -> list[str]:
 
     L = ["## 10. 前提の感応度", ""]
     L.append(
-        "付与率への反応は日次データがないと校正できない。"
-        "前提が外れていたら結論が変わるのかを確認する。"
+        "シェアの反応は日別実績から実測できたが、0.17〜0.29 の幅が残る。"
+        "その両端で提案が変わるのかを確認する。"
     )
     L.append("")
     L.append("| 前提 | 内容 | 市場規模の弾力性 | 2pt優位の効果 | エントリー日数 | 増分原資 | 増分GMV | 純増効果 |")
@@ -202,17 +212,20 @@ def _section_sensitivity(scenarios: list | None) -> list[str]:
     return L
 
 
-def _section_share_estimate(estimate, participation_summary: list | None) -> list[str]:
+def _section_share_estimate(
+    estimate, participation_summary: list | None, behavior=None
+) -> list[str]:
     """シェア反応を実測できたかどうか.
 
-    できなかった場合、それを隠さず書く。提案の金額はこの前提に乗っている。
+    できなかった部分は隠さず書く。提案の金額はこの前提に乗っている。
     """
     if estimate is None:
         return []
+    daily_lines = _daily_findings_lines(behavior) if behavior is not None else []
     L = ["## 9. シェア反応は実測できたか", ""]
     L.append(
         "エントリーの価値は「自社の付与率の優位がどれだけ注文を増やすか」で決まる。"
-        "参加履歴があれば実測できるはずだが、結果は次のとおり。"
+        "まず月次実績13ヶ月で試したのが次の結果。"
     )
     L.append("")
 
@@ -244,27 +257,94 @@ def _section_share_estimate(estimate, participation_summary: list | None) -> lis
     L.append("")
 
     if estimate.identifiable:
-        L.append(f"> **推定できた**: {estimate.reason}")
+        L.append(f"> **月次でも推定できた**: {estimate.reason}")
     else:
-        L.append(f"> **推定できなかった**: {estimate.reason}")
+        L.append(f"> **月次では推定できなかった**: {estimate.reason}")
         L.append("")
         L.append(
             "参加を始めた時期が成長トレンドの立ち上がりと重なっているため、"
             "「参加したから伸びた」のか「もともと伸びていた」のかを"
             "月次データでは切り分けられない。"
         )
-        L.append("")
-        L.append(
-            "**この提案の金額は、実測できていない前提の上に乗っている。**"
-            "前提の振れ幅は次章の感応度を参照。"
-        )
-        L.append("")
-        L.append(
-            "日別の注文数・セッション数があれば、参加日と非参加日を直接比較できる。"
-            "これが手に入れば、残っている不確実性はほぼ解消する。"
-        )
     L.append("")
+    L.extend(daily_lines)
     return L
+
+
+# 日別実績から実測した結果。tools/analyze_daily.py の出力を要約したもの。
+# 数値を変えるときは同スクリプトを再実行して差し替えること。
+DAILY_FINDINGS = """### 日別データで解けた
+
+日別実績（2026-06-16〜09-15・92日）と参加履歴を突き合わせると、
+**同じ期間の中で**参加日25日と非参加日67日を比べられる。
+時期による交絡がないため、月次で解けなかった問題が解ける。
+
+ただし単純比較はできない。参加日はモール販促日を狙って選ばれており、
+実測でもセッションが +48%（t=7.45）多い。**エントリー自体が来訪を
+増やすことはありえない**ので、これは観測できていないモール販促
+（プレミアムな日曜日・感謝デー等）を狙った分である。
+曜日・線形トレンド・5のつく日・ゾロ目・給料日サイクルを同時に制御し、
+さらにセッションでも制御した場合まで含めて幅を取る。
+
+| 制御した交絡 | 参加の効果（転換率） | t値 | `share_gain_at_reference` 換算 |
+|---|---:|---:|---:|
+| 曜日＋トレンド | +42.4% | 3.58 | 0.18〜0.22 |
+| ＋5のつく日 | +55.9% | 4.78 | 0.23〜0.29 |
+| ＋ゾロ目 | +49.4% | 4.28 | 0.21〜0.26 |
+| ＋log(セッション) | +41.1% | 2.87 | 0.17〜0.22 |
+
+> **推定レンジは 0.17〜0.29。既定値 0.20 はこの範囲の中にある。**
+> 換算に幅が出るのは、参加日にモール負担の +2% が開いていたかどうかが
+> 記録に残っていないため。
+
+### 併せて見つかったモデルの誤り
+
+**全ストア共通の付与率は、集客だけでなく転換率も上げていた。**
+
+| | 効果 | t値 | 換算 |
+|---|---:|---:|---|
+| 5のつく日 → セッション | +63.0% | 6.62 | `market_elasticity` = 1.08 ± 0.16 |
+| 5のつく日 → **転換率** | **+66.0%** | 4.17 | `intent_elasticity` = 1.12 ± 0.29 |
+
+以前のモデルは「全ストア対象の施策は競合も同条件だから、市場規模だけを
+動かしてシェアは動かさない」としており、転換率側の経路を持っていなかった。
+そのぶん 5のつく日の基準注文数を過小評価していた（基準が低ければ増分も
+小さく見えるので、5のつく日の評価が不当に下がる）。
+5のつく日（5/15/25）と参加日はこの期間で1日も重ならないため、
+この効果は参加効果と混ざらずに識別できている。現在のモデルは
+`intent_elasticity` としてこの経路を持っている。
+
+**曜日係数の仮値も大きく外れていた。** 日曜は仮値 1.18 に対し実測 2.12。
+縮小推定を採っても 1.60 で、プレミアムな日曜日の評価が大きく変わる。
+
+### まだ実測できていないもの
+
+`share_elasticity`（優位を増やしたときの逓減の強さ、既定 0.70）は
+**実測できていない**。参加実績が46日は5%・3日は4%とほぼ一点に
+集中しており、カーブの曲がり具合を測る材料がないため。
+
+これは効くところで効く。第6章でプレミアムな日曜日・感謝デー・爆買WEEKを
+見送っているのは、これらの日はプロモーションパッケージですでに +2.8〜4.0%
+の優位が付いており、そこへ自社分を上乗せしても逓減する、という判断による。
+逓減が想定より弱ければ、これらの日は入るべき日に変わる。
+
+**確かめ方**: 条件の近い日を選んで自社設定率だけを変える
+（例: 定常施策のみの土曜を +2% と +4% に振り分ける）。
+数日分の記録で逓減の強さが測れる。"""
+
+
+def _daily_findings_lines(behavior) -> list[str]:
+    """日別実績で分かったことを載せる(日別で校正済みのときだけ)."""
+    if "日別実績" not in behavior.calibration_note:
+        return [
+            "**この提案の金額は、実測できていない前提の上に乗っている。**"
+            "前提の振れ幅は次章の感応度を参照。",
+            "",
+            "日別の注文数・セッション数があれば、参加日と非参加日を直接比較できる。"
+            "これが手に入れば、残っている不確実性はほぼ解消する。",
+            "",
+        ]
+    return DAILY_FINDINGS.split("\n") + [""]
 
 
 def _section_validation(
@@ -398,33 +478,42 @@ def _section_assumptions(cfg: AppConfig, schedule: PromoSchedule, plan: PlanResu
     note = cfg.behavior.calibration_note
     # 校正済みかどうかは、calibrate が書き込む「〜で校正」の有無で判定する。
     # 注記には未校正の係数の説明も含まれるため、「未校正」の有無では判定できない。
-    calibrated = "で校正" in note
-    monthly_only = "月次実績" in note
-    mark = "**実測で校正済み**" if calibrated else "初期仮値"
-    L.append(f"| 基準セッション数 `base_sessions` | {mark} |")
-    L.append(f"| 基準転換率 `base_cvr` | {mark} |")
-    season = mark + (
+    monthly = "月次実績" in note
+    daily = "日別実績" in note
+    monthly_mark = "**月次実績で校正済み**" if monthly else "初期仮値"
+    daily_mark = "**日別実績で校正済み**" if daily else "初期仮値"
+    need_daily = "" if daily else "（日次データが必要）"
+    L.append(f"| 基準セッション数 `base_sessions` | {monthly_mark} |")
+    L.append(f"| 基準転換率 `base_cvr` | {monthly_mark} |")
+    season = monthly_mark + (
         "（月次データは1ヶ月=1点のため弱い推定。縮小推定で過学習を抑制）"
-        if calibrated and monthly_only else ""
+        if monthly else ""
     )
     L.append(f"| 月次季節係数 | {season} |")
     L.append(
         "| 平均注文単価 `aov` | config の設定値"
         "（`calibrate` が出す推奨値と突き合わせること） |"
     )
-    if monthly_only:
-        L.append("| 曜日係数 | **初期仮値**（日次データが必要） |")
-        L.append("| 給料日サイクル係数 | **初期仮値**（日次データが必要） |")
-    else:
-        L.append(f"| 曜日係数 | {mark} |")
-        L.append(f"| 給料日サイクル係数 | {mark} |")
+    shrunk = "（縮小推定。素の土曜が4日しかないため点推定をそのままは採らない）"
+    L.append(f"| 曜日係数 | {daily_mark}{shrunk if daily else need_daily} |")
+    L.append(f"| 給料日サイクル係数 | {daily_mark}{shrunk if daily else need_daily} |")
     L.append(
-        "| 市場規模の弾力性 `market_elasticity` | "
-        "**初期仮値**（日次データ＋エントリー記録が必要） |"
+        f"| 市場規模の弾力性 `market_elasticity` | {daily_mark}"
+        + ("（5のつく日でセッション +63%。弾力性 1.08±0.16 を上限1.0に丸めた）"
+           if daily else "（日次データ＋エントリー記録が必要）")
+        + " |"
     )
     L.append(
-        "| シェアの反応 `share_gain_at_reference` | "
-        "**初期仮値**（日次データ＋エントリー記録が必要） |"
+        f"| 来訪意欲の弾力性 `intent_elasticity` | {daily_mark}"
+        + ("（5のつく日で転換率 +66%、t=3.82。弾力性 1.12±0.29）"
+           if daily else "（日次データが必要）")
+        + " |"
+    )
+    L.append(
+        f"| シェアの反応 `share_gain_at_reference` | {daily_mark}"
+        + ("（推定レンジ 0.17〜0.29。既定はその中心の0.20）"
+           if daily else "（日次データ＋エントリー記録が必要）")
+        + " |"
     )
     if store.distribution.count:
         L.append(
@@ -435,6 +524,11 @@ def _section_assumptions(cfg: AppConfig, schedule: PromoSchedule, plan: PlanResu
         L.append("| 注文単価のばらつき `aov_sigma` | **初期仮値**（注文明細が必要） |")
     L.append("")
     L.append(
+        "> **金額の絶対値は目安として扱うこと。** シェアの反応には"
+        "0.17〜0.29 の推定幅が残っており、増分GMVや純増効果の絶対額は"
+        "実績での検証が必要。日ごとの優先順位づけ（どの日に入るか）は"
+        "この幅の中で安定している（第8章の感応度分析を参照）。"
+        if daily else
         "> **金額の絶対値は目安として扱うこと。** 未校正の係数が残っているため、"
         "日ごとの優先順位づけには使えるが、増分GMVや純増効果の絶対額は"
         "実績での検証が必要。"
@@ -493,8 +587,8 @@ def _section_deadlines(plan: PlanResult) -> list[str]:
             )
         L.append("")
         L.append(
-            "> 締切はPDFに記載がないため開催3日前の暫定値です。"
-            "判明次第スケジュールYAMLの `entry_deadline` に記入してください。"
+            "> 締切はスケジュールYAMLの `entry_deadline` の値です。"
+            "記入がない施策は開催3日前を暫定値としています。"
         )
     L.append("")
     return L
@@ -562,6 +656,7 @@ def _section_detail(cfg: AppConfig, schedule: PromoSchedule, plan: PlanResult) -
         "| 増分GMV | 増分原資 | ROAS | 純増効果 |"
     )
     L.append("|---|---|---:|---:|---:|---:|---:|---:|---:|")
+    forced = 0
     for u, o in plan.selected:
         for est in o.estimates:
             gated = "、".join(
@@ -569,13 +664,102 @@ def _section_detail(cfg: AppConfig, schedule: PromoSchedule, plan: PlanResult) -
                 for b in schedule.benefits_on(est.day)
                 if b.requires_entry and b.is_active(plan.participation)
             ) or "なし（自社上乗せのみ）"
+            mark = ""
+            if u.mandatory and est.roas < cfg.store.min_roas:
+                mark, forced = " ※", forced + 1
             L.append(
-                f"| {format_day(est.day)} | {gated} | +{est.store_rate:.0%} | "
+                f"| {format_day(est.day)}{mark} | {gated} | +{est.store_rate:.0%} | "
                 f"{est.entry_total_rate:.1%} | "
                 f"{est.base_orders:.0f}→{est.entry_orders:.0f} | "
                 f"{YEN.format(est.incremental_gmv)} | {YEN.format(est.point_cost)} | "
                 f"{_roas(est.roas)} | {YEN.format(est.net_value)} |"
             )
+    L.append("")
+    if forced:
+        L.append(
+            f"> ※ の{forced}日は ROAS 下限（{cfg.store.min_roas:.1f}）を下回るが、"
+            "`mandatory_benefit_ids` により必ずエントリーする指定になっている日。"
+            "理由は第7章を参照。"
+        )
+        L.append("")
+    return L
+
+
+def _section_mandatory(cfg: AppConfig, schedule: PromoSchedule, plan: PlanResult) -> list[str]:
+    """採算に関わらず入る指定と、その理由."""
+    ids = list(cfg.store.mandatory_benefit_ids)
+    if not ids:
+        return []
+    by_id = {b.id: b for b in schedule.benefits}
+    forced = [
+        (u, o, est)
+        for u, o in plan.selected
+        for est in o.estimates
+        if u.mandatory and est.roas < cfg.store.min_roas
+    ]
+    if not forced:
+        return []
+    cost = sum(est.point_cost for _u, _o, est in forced)
+    days = sorted({est.day for _u, _o, est in forced})
+
+    L = ["## 7. 採算基準を外して入る日と、その理由", ""]
+    L.append(
+        f"次の{len(days)}日は ROAS 下限（{cfg.store.min_roas:.1f}）を下回るが、"
+        "`config/config.yaml` の `mandatory_benefit_ids` で"
+        "「採算に関わらず入る」指定にしている。"
+    )
+    L.append("")
+    L.append("| 対象施策 | 対象日 | 追加でかかる自社原資 |")
+    L.append("|---|---|---:|")
+    for bid in ids:
+        b = by_id.get(bid)
+        if b is None:
+            continue
+        rows = [(u, o, e) for u, o, e in forced if any(
+            x.id == bid for x in schedule.benefits_on(e.day))]
+        if not rows:
+            continue
+        L.append(
+            f"| {b.name} | "
+            + "、".join(format_day(e.day) for _u, _o, e in rows)
+            + f" | {YEN.format(sum(e.point_cost for _u, _o, e in rows))}円 |"
+        )
+    L.append(f"| **合計** | **{len(days)}日** | **{YEN.format(cost)}円** |")
+    L.append("")
+    L.append("### なぜ採算を外してまで入るのか")
+    L.append("")
+    L.append(
+        "**販促カレンダーの読み取りと、共有いただいた前提が食い違っているため。**"
+    )
+    L.append("")
+    L.append(
+        "- カレンダーPDFの読み取り: この3施策はプロモーションパッケージ加入だけで開く"
+        "（＝ボーナスストアPlusへのエントリーは不要）"
+    )
+    L.append(
+        "- 当初共有いただいた前提: 「プレミアムな日曜日・ヤフショ感謝デー・"
+        "超PayPay祭・爆買WEEKのようなイベントは全てボーナスストアへの"
+        "エントリーが必要」"
+    )
+    L.append("")
+    L.append("どちらが正しいかで、外したときの損失の桁が変わる。")
+    L.append("")
+    L.append("| もし | 入った場合 | 入らなかった場合 |")
+    L.append("|---|---|---|")
+    L.append(
+        f"| エントリー**不要**が正しい | 自社ポイントを{YEN.format(cost)}円余分に配る | 最適 |"
+    )
+    L.append(
+        "| エントリー**必要**が正しい | 最適 | "
+        "モール負担の上乗せを全日取り逃す（増分GMV 約28万円） |"
+    )
+    L.append("")
+    L.append(
+        f"> 外し方を誤ったときの損失が約20倍違う。"
+        f"{YEN.format(cost)}は保険料として妥当と判断した。"
+        "**モール担当者に確認が取れ次第、`mandatory_benefit_ids` を空にして"
+        "再実行すること。**"
+    )
     L.append("")
     return L
 
@@ -868,7 +1052,7 @@ def render_html(cfg: AppConfig, schedule: PromoSchedule, plan: PlanResult) -> st
 <h1>{html.escape(schedule.month)} ボーナスストア エントリー提案 — {html.escape(cfg.store.store_name)}</h1>
 <div class="caution">
  カレンダー掲載の上乗せは<b>モール負担</b>前提。自社原資はストアポイント1%＋自社設定率のみ。
- 曜日係数・給料日サイクル・付与率への反応は<b>初期仮値</b>のため、金額の絶対値は目安。
+ シェアの反応には推定幅（0.17〜0.29）が残るため、金額の絶対値は目安。
 </div>
 <div class="kpis">
  <div class="kpi"><b>{len(plan.selected_days())}日</b><span>推奨エントリー日数</span></div>

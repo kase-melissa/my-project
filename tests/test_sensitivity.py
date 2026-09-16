@@ -28,7 +28,7 @@ class TestScenarios(unittest.TestCase):
 
     def test_scenarios_span_weak_to_strong(self):
         self.assertEqual(
-            [s.name for s in self.scenarios], ["実測点推定", "弱気", "既定", "強気"]
+            [s.name for s in self.scenarios], ["下限", "既定", "上限"]
         )
         gains = [s.share_gain_at_reference for s in self.scenarios]
         self.assertEqual(gains, sorted(gains))

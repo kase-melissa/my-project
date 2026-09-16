@@ -3,7 +3,13 @@ from datetime import date
 
 from bonus_planner.behavior import DemandModel, build_day_context, combine_with_decay
 from bonus_planner.config import BehaviorParams, StoreConfig
-from bonus_planner.models import Benefit, DayContext, Participation, PromoSchedule
+from bonus_planner.models import (
+    ELIGIBILITY_BSPLUS,
+    Benefit,
+    DayContext,
+    Participation,
+    PromoSchedule,
+)
 
 DAY = date(2026, 10, 7)
 
@@ -44,9 +50,61 @@ class TestDemandModel(unittest.TestCase):
     def test_market_factor_grows_with_mall_wide_rate(self):
         self.assertGreater(self.m.market_factor(0.11), self.m.market_factor(0.07))
 
-    def test_market_factor_is_sublinear(self):
-        # 付与率を2倍にしても来訪は2倍にならない
-        self.assertLess(self.m.market_factor(0.14), 2 * self.m.market_factor(0.07))
+    def test_market_factor_does_not_amplify(self):
+        # 付与率を2倍にしても来訪が2倍を超えることはない
+        # (実測は 1.08 ± 0.16 だが、モデルは 1.0 を上限としている)
+        self.assertLessEqual(
+            self.m.market_factor(0.14), 2 * self.m.market_factor(0.07) + 1e-9
+        )
+
+    # -- 来訪意欲 -----------------------------------------------------
+    def test_intent_factor_is_one_at_baseline(self):
+        self.assertAlmostEqual(self.m.intent_factor(self.p.baseline_rate), 1.0)
+
+    def test_intent_factor_grows_with_mall_wide_rate(self):
+        """全ストア共通の付与率が上がると転換率も上がる.
+
+        日別実績で 5のつく日に転換率が +66%(t=3.82) 上がっていた。
+        競合も同条件なのでシェアは動かないが、「5のつく日を待って買う」層が
+        動くぶん来訪者の質が変わる。
+        """
+        self.assertGreater(self.m.intent_factor(0.11), self.m.intent_factor(0.07))
+
+    def test_intent_factor_is_separate_from_share(self):
+        """来訪意欲は自社の上乗せでは動かない(逆も同じ)."""
+        import inspect
+
+        self.assertEqual(
+            list(inspect.signature(self.m.intent_factor).parameters), ["mall_wide_rate"]
+        )
+
+    def test_orders_equal_sessions_times_cvr(self):
+        """注文数 = セッション × 転換率 が保たれている."""
+        part = self.store.participation(bonus_store_plus=True)
+        cases = (
+            [],
+            [ben(rate=0.04)],                                    # 全ストア対象
+            [ben(rate=0.03, eligibility=ELIGIBILITY_BSPLUS)],    # 参加資格つき
+            [ben(rate=0.04), ben(id="c", rate=0.03, eligibility=ELIGIBILITY_BSPLUS)],
+        )
+        for benefits in cases:
+            ctx = self.ctx(benefits)
+            with self.subTest(n=len(benefits)):
+                self.assertAlmostEqual(
+                    self.m.orders(ctx, part, 0.03),
+                    self.m.sessions(ctx, part) * self.m.cvr(ctx, part, 0.03),
+                )
+
+    def test_mall_wide_benefit_moves_both_channels(self):
+        """全ストア共通の付与率は、セッションと転換率の両方を動かす.
+
+        以前のモデルはセッションしか動かしておらず、5のつく日の
+        基準注文数を過小評価していた。
+        """
+        part = self.store.participation(bonus_store_plus=False)
+        plain, five = self.ctx([]), self.ctx([ben(rate=0.04)])
+        self.assertGreater(self.m.sessions(five, part), self.m.sessions(plain, part))
+        self.assertGreater(self.m.cvr(five, part), self.m.cvr(plain, part))
 
     # -- シェア -------------------------------------------------------
     def test_share_factor_is_one_without_advantage(self):

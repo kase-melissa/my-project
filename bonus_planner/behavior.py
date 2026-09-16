@@ -3,7 +3,9 @@
     セッション(d) = base_sessions × 曜日 × 給料日 × 月次季節
                     × 市場規模係数(全ストア共通の付与率)   ← パイの大きさ
                     × 集客係数(付与率とは別の広告効果)
-    転換率(d)     = base_cvr × シェア係数(自社だけの上乗せ)  ← パイの取り分
+    転換率(d)     = base_cvr
+                    × 来訪意欲係数(全ストア共通の付与率)   ← 来訪者の「質」
+                    × シェア係数(自社だけの上乗せ)        ← パイの取り分
     注文数(d)     = セッション(d) × 転換率(d)
 
 集客と転換率に分けているのは、実績でこの2つが別々に動いていたため。
@@ -19,6 +21,14 @@
   全ストア対象 (5のつく日・ファーストデイ・定常施策)
       競合も同じ条件になるので、自社のシェアは動かない。
       動くのはモール全体の来訪者数、つまり市場規模。
+
+      ただし来訪者の「数」だけでなく「質」も動く。日別実績では
+      5のつく日にセッションが +63%、**転換率も +66%** 上がっていた
+      (5のつく日と自社の参加日はこの期間で1日も重ならないため、
+      この効果はきれいに識別できている)。
+      「5のつく日を待って買う」層が動くぶん、同じ1セッションあたりの
+      購買確率が上がる。これを来訪意欲係数として転換率側に持つ。
+      競合との相対的な魅力は変わらないので、シェア係数とは別経路。
 
   参加資格つき (ボーナスストアPlus参加・プロモーションパッケージ加入)
       持っていない競合に対する優位になるので、シェアが動く。
@@ -121,6 +131,19 @@ class DemandModel:
             return 0.0
         return (mall_wide_rate / self.p.baseline_rate) ** self.p.market_elasticity
 
+    def intent_factor(self, mall_wide_rate: float) -> float:
+        """来訪者の購買意欲. 全ストア共通の付与率で決まる.
+
+        market_factor と同じ形だが、掛かる先が転換率である点が違う。
+        baseline_rate(定常施策のみの日)で1.0。
+
+        シェア係数と混同しないこと。こちらは競合も同じだけ得をする
+        (相対的な優位は生まれない)が、モール全体の転換率が上がる。
+        """
+        if mall_wide_rate <= 0:
+            return 0.0
+        return (mall_wide_rate / self.p.baseline_rate) ** self.p.intent_elasticity
+
     def share_factor(self, own_advantage: float) -> float:
         """自社シェア. 競合に対する付与率の「絶対差」で決まる.
 
@@ -148,9 +171,14 @@ class DemandModel:
         )
 
     def cvr(self, ctx: DayContext, part: Participation, own_rate: float = 0.0) -> float:
-        """その日の転換率. 競合に対する付与率の優位で決まる."""
-        _mall_wide, gated = self.scoped_rates(ctx, part)
-        return min(self.p.base_cvr * self.share_factor(gated + own_rate), 1.0)
+        """その日の転換率. 来訪者の質(全ストア共通)と自社の優位で決まる."""
+        mall_wide, gated = self.scoped_rates(ctx, part)
+        return min(
+            self.p.base_cvr
+            * self.intent_factor(mall_wide)
+            * self.share_factor(gated + own_rate),
+            1.0,
+        )
 
     def orders(self, ctx: DayContext, part: Participation, own_rate: float = 0.0) -> float:
         return self.sessions(ctx, part) * self.cvr(ctx, part, own_rate)
