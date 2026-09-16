@@ -30,7 +30,7 @@ class TestCombine(unittest.TestCase):
 
 class TestDemandModel(unittest.TestCase):
     def setUp(self):
-        self.p = BehaviorParams(base_orders=100.0, month={})
+        self.p = BehaviorParams(base_sessions=1000.0, base_cvr=0.10, month={})
         self.store = StoreConfig(aov=20000, aov_sigma=0.55, promo_package=True)
         self.m = DemandModel(self.p, self.store)
 
@@ -61,8 +61,42 @@ class TestDemandModel(unittest.TestCase):
 
         顧客にとって2ポイント分の価値は基準率に依らず同じ金額のため。
         比率で見るとモールが最も集客している日を避ける提案になってしまう。
+        シェア係数が全ストア共通の付与率を引数に取らないことで担保している。
         """
-        self.assertAlmostEqual(self.m.share_factor(0.02), self.m.share_factor(0.02))
+        import inspect
+
+        params = inspect.signature(self.m.share_factor).parameters
+        self.assertEqual(list(params), ["own_advantage"])
+
+    def test_orders_is_sessions_times_cvr(self):
+        benefits = [ben(id="base", rate=0.07, eligibility="all")]
+        c = self.ctx(benefits)
+        part = Participation(promo_package=True)
+        self.assertAlmostEqual(
+            self.m.orders(c, part), self.m.sessions(c, part) * self.m.cvr(c, part)
+        )
+
+    def test_cvr_is_capped_at_one(self):
+        p = BehaviorParams(base_sessions=100.0, base_cvr=0.95, month={})
+        m = DemandModel(p, self.store)
+        benefits = [
+            ben(id="base", rate=0.07, eligibility="all"),
+            ben(id="big", rate=0.50, eligibility="promo_package"),
+        ]
+        c = self.ctx(benefits)
+        self.assertLessEqual(m.cvr(c, Participation(promo_package=True)), 1.0)
+
+    def test_entry_does_not_change_sessions(self):
+        """参加してもモール全体の集客は変わらない。動くのは転換率だけ."""
+        benefits = [
+            ben(id="base", rate=0.07, eligibility="all"),
+            ben(id="plus", rate=0.02, eligibility="bonus_store_plus"),
+        ]
+        c = self.ctx(benefits)
+        out = Participation(promo_package=True, bonus_store_plus=False)
+        inn = Participation(promo_package=True, bonus_store_plus=True)
+        self.assertAlmostEqual(self.m.sessions(c, out), self.m.sessions(c, inn))
+        self.assertGreater(self.m.cvr(c, inn), self.m.cvr(c, out))
 
     def test_share_factor_diminishes(self):
         one = self.m.share_factor(0.02) - 1.0

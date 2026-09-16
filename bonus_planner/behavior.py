@@ -1,10 +1,16 @@
 """Yahoo!ショッピング顧客の行動モデル(需要予測).
 
-    注文数(d) = base_orders
-              × 曜日係数 × 給料日サイクル係数 × 月次季節係数
-              × 市場規模係数(全ストア共通の付与率)     ← パイの大きさ
-              × シェア係数(自社だけの上乗せ)          ← パイの取り分
-              × 集客係数(付与率とは別の広告効果)
+    セッション(d) = base_sessions × 曜日 × 給料日 × 月次季節
+                    × 市場規模係数(全ストア共通の付与率)   ← パイの大きさ
+                    × 集客係数(付与率とは別の広告効果)
+    転換率(d)     = base_cvr × シェア係数(自社だけの上乗せ)  ← パイの取り分
+    注文数(d)     = セッション(d) × 転換率(d)
+
+集客と転換率に分けているのは、実績でこの2つが別々に動いていたため。
+2025-09 → 2026-08 でセッションは +16% だが CVR は +23%、単価も +23%。
+注文数1本で持つとトレンド推定がこの構造を潰してしまう。
+分けておけば、市場規模係数はセッションに、シェア係数は転換率にかかり、
+どちらも実績で検証できる量に対応づく。
 
 ## 全ストア共通の付与率とシェアを分ける理由
 
@@ -131,15 +137,23 @@ class DemandModel:
         return 1.0 + self.p.share_gain_at_reference * (ratio ** self.p.share_elasticity)
 
     # -- 需要 ---------------------------------------------------------
-    def orders(self, ctx: DayContext, part: Participation, own_rate: float = 0.0) -> float:
-        mall_wide, gated = self.scoped_rates(ctx, part)
+    def sessions(self, ctx: DayContext, part: Participation) -> float:
+        """その日のセッション数. 全ストア共通の付与率(=モール全体の集客)で決まる."""
+        mall_wide, _gated = self.scoped_rates(ctx, part)
         return (
-            self.p.base_orders
+            self.p.base_sessions
             * self.calendar_factor(ctx)
             * self.traffic_multiplier(ctx, part)
             * self.market_factor(mall_wide)
-            * self.share_factor(gated + own_rate)
         )
+
+    def cvr(self, ctx: DayContext, part: Participation, own_rate: float = 0.0) -> float:
+        """その日の転換率. 競合に対する付与率の優位で決まる."""
+        _mall_wide, gated = self.scoped_rates(ctx, part)
+        return min(self.p.base_cvr * self.share_factor(gated + own_rate), 1.0)
+
+    def orders(self, ctx: DayContext, part: Participation, own_rate: float = 0.0) -> float:
+        return self.sessions(ctx, part) * self.cvr(ctx, part, own_rate)
 
     # -- エントリー判断に関わる情報 -----------------------------------
     def entry_gated_benefits(self, ctx: DayContext) -> list:

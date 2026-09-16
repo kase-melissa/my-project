@@ -3,15 +3,26 @@
 # !! 重要 !!
 # 以下は業界的な相場観にもとづく「出発点」であって、自社の実測値ではない。
 #
-# 月次実績(month,orders,gmv)があれば base_orders と month は校正できる:
+# 実績エクスポート(セッション列つき)があれば
+# base_sessions・base_cvr・month は校正できる:
 #   python3 -m bonus_planner calibrate \
 #       --history data/sales_history_monthly.csv \
+#       --schedule data/promo_schedule/2026-10.yaml \
 #       --out config/behavior_calibrated.yaml
+#
+# --schedule を付けないと、実績に含まれる販促イベントの上振れが
+# 差し引かれず、ベースライン予測が過大になる。
 #
 # 曜日係数・給料日サイクル係数・rate_elasticity は日次データがないと校正できない。
 behavior:
-  # 定常施策だけの日(総付与率 = baseline_rate)の平均的な1日の注文数
-  base_orders: 42.0
+  # 需要は「集客 × 転換率」に分解して持つ。
+  # 実績では成長の大半がセッション増ではなく転換率と単価の改善だったため、
+  # 1本にまとめるとトレンド推定を誤る。
+  #
+  # 定常施策だけの日(総付与率 = baseline_rate)の1日あたりセッション数
+  base_sessions: 240.0
+  # 基準転換率(注文数 / セッション)
+  base_cvr: 0.10
 
   # 曜日係数(平均1になるよう正規化される) ※日次データがないため未校正
   dow:

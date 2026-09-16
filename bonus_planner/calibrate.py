@@ -3,8 +3,14 @@
 入力の粒度で校正できる範囲が変わる。できないものは仮値のまま残し、
 `calibration_note` に明記する(黙って埋めない)。
 
-月次 (month,orders,gmv[,days]) で校正できるもの:
-    base_orders, month(季節係数), aov の推奨値
+受け付ける入力:
+    1. ストアクリエイターProの実績エクスポート(1列目が「日付」、CP932)
+    2. 簡易月次 month,orders,gmv[,days]
+    3. 日次 date,orders,gmv
+
+月次で校正できるもの:
+    base_sessions, base_cvr, month(季節係数), aov の推奨値
+    ※ セッション列があるときだけ集客と転換率を分離できる
 月次では校正できないもの:
     曜日係数, 給料日サイクル係数, 市場規模とシェアの弾力性, aov_sigma
 
@@ -15,6 +21,7 @@ from __future__ import annotations
 
 import calendar as _calendar
 import csv
+import io
 import math
 import statistics
 from dataclasses import dataclass, replace
@@ -46,7 +53,19 @@ class MonthlyRow:
     month: int
     orders: float
     gmv: float
-    days: int | None = None  # 部分月の実日数
+    days: int | None = None      # 部分月の実日数
+    sessions: float | None = None
+    buyers: float | None = None
+
+    @property
+    def aov(self) -> float:
+        return self.gmv / self.orders if self.orders else 0.0
+
+    @property
+    def cvr(self) -> float | None:
+        if not self.sessions:
+            return None
+        return self.orders / self.sessions
 
     @property
     def key(self) -> str:
@@ -65,34 +84,121 @@ class MonthlyRow:
         return [date(self.year, self.month, i + 1) for i in range(n)]
 
 
-def load_history(path: str | Path) -> tuple[str, list]:
+# Yahoo!ショッピング ストアクリエイターPro の実績エクスポートの列名。
+# 同じ「前年比」列が何度も現れるため、名前ではなく位置で拾う必要がある。
+YAHOO_COLUMNS = {
+    "month": "日付",
+    "gmv": "売上合計値",
+    "orders": "注文数 - 注文数合計",
+    "buyers": "注文数 - 注文者数合計",
+    "sessions": "セッション合計",
+}
+
+
+def _decode(path: Path) -> str:
+    """ストアクリエイターProのエクスポートは CP932。UTF-8 も受ける."""
+    raw = path.read_bytes()
+    for enc in ("utf-8-sig", "cp932"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError(f"文字コードを判別できませんでした: {path}")
+
+
+def load_history(
+    path: str | Path, today: date | None = None, partial_days: int | None = None
+) -> tuple[str, list]:
     """実績CSVを読み、('daily'|'monthly', 行リスト) を返す.
 
-    1列目が YYYY-MM なら月次、YYYY-MM-DD なら日次と判定する。
+    受け付ける形式:
+      1. ストアクリエイターProの実績エクスポート（1列目が「日付」、CP932）
+      2. 簡易月次 month,orders,gmv[,days]
+      3. 日次 date,orders,gmv
+
+    形式1は日数列を持たないため、最終月が当月なら `today` から実日数を推定する
+    (データは前日までとみなす)。`partial_days` で明示的に上書きできる。
     """
     p = Path(path)
     if not p.exists():
         raise FileNotFoundError(f"実績CSVが見つかりません: {p}")
-    with p.open(encoding="utf-8-sig", newline="") as f:
-        reader = csv.DictReader(f)
-        fields = [c.strip() for c in (reader.fieldnames or [])]
-        if not fields:
-            raise ValueError("実績CSVにヘッダーがありません")
-        key = fields[0]
-        if key not in ("date", "month"):
-            raise ValueError(
-                f"実績CSVの1列目は date(日次) か month(月次) です: {key!r}"
-            )
-        if "orders" not in fields:
-            raise ValueError("実績CSVに orders 列がありません")
-        raw = list(reader)
 
-    if not raw:
+    rows = list(csv.reader(io.StringIO(_decode(p))))
+    if not rows:
+        raise ValueError("実績CSVにヘッダーがありません")
+    header = [c.strip() for c in rows[0]]
+    body = [r for r in rows[1:] if r and any(c.strip() for c in r)]
+    if not body:
         raise ValueError("実績CSVにデータ行がありません")
 
-    if key == "month":
-        return "monthly", _parse_monthly(raw)
-    return "daily", _parse_daily(raw)
+    key = header[0]
+    if key == YAHOO_COLUMNS["month"]:
+        parsed = _parse_yahoo_export(header, body)
+    elif key in ("month", "date"):
+        if "orders" not in header:
+            raise ValueError("実績CSVに orders 列がありません")
+        rows_as_dicts = [dict(zip(header, r)) for r in body]
+        if key == "date":
+            return "daily", _parse_daily(rows_as_dicts)
+        parsed = _parse_monthly(rows_as_dicts)
+    else:
+        raise ValueError(
+            f"実績CSVの1列目は「日付」(エクスポート) / month / date のいずれかです: {key!r}"
+        )
+
+    _apply_partial_days(parsed, today, partial_days)
+    return "monthly", parsed
+
+
+def _apply_partial_days(
+    rows: list[MonthlyRow], today: date | None, partial_days: int | None
+) -> None:
+    """最終月が当月なら実日数を補う."""
+    if not rows:
+        return
+    last = rows[-1]
+    if partial_days is not None:
+        last.days = partial_days
+        return
+    if last.days is not None or today is None:
+        return
+    if (last.year, last.month) == (today.year, today.month):
+        # エクスポートは前日までのデータとみなす
+        last.days = max(today.day - 1, 1)
+
+
+def _column_index(header: list[str], name: str) -> int:
+    try:
+        return header.index(name)
+    except ValueError as exc:
+        raise ValueError(
+            f"実績エクスポートに必要な列がありません: {name}"
+        ) from exc
+
+
+def _parse_yahoo_export(header: list[str], body: list[list[str]]) -> list[MonthlyRow]:
+    """ストアクリエイターProの実績エクスポートを読む.
+
+    「前年比」列が繰り返し現れるため、DictReader ではなく位置で拾う。
+    """
+    idx = {k: _column_index(header, v) for k, v in YAHOO_COLUMNS.items()}
+    rows: list[MonthlyRow] = []
+    for i, r in enumerate(body, start=2):
+        token = r[idx["month"]].strip()
+        try:
+            year, month = (int(x) for x in token.split("-"))
+            orders = float(r[idx["orders"]] or 0)
+            gmv = float(r[idx["gmv"]] or 0)
+            sessions = float(r[idx["sessions"]] or 0) or None
+            buyers = float(r[idx["buyers"]] or 0) or None
+        except (ValueError, IndexError) as exc:
+            raise ValueError(f"実績エクスポートの{i}行目を解釈できません: {exc}") from exc
+        if orders <= 0:
+            continue
+        rows.append(MonthlyRow(year, month, orders, gmv, None, sessions, buyers))
+    if not rows:
+        raise ValueError("実績エクスポートに有効な行がありません")
+    return sorted(rows, key=lambda r: (r.year, r.month))
 
 
 def _parse_monthly(raw: list[dict]) -> list[MonthlyRow]:
@@ -172,9 +278,21 @@ class MonthlyCalibration:
     params: BehaviorParams
     suggested_aov: float
     notes: list[str]
-    monthly_index: dict[str, float]     # カレンダー構成を除去した日次水準
-    trend_at: dict[str, float]          # トレンド値
-    seasonal_raw: dict[str, float]      # 縮小前の残差
+    basis: str                      # "sessions" | "orders"
+    monthly_index: dict[str, float]  # カレンダー構成を除去した日次水準
+    trend_at: dict[str, float]       # トレンド値
+    seasonal_raw: dict[str, float]   # 縮小前の残差
+    cvr_at: dict[str, float]         # 実績の転換率
+    cvr_trend_at: dict[str, float]   # 転換率のトレンド
+
+
+def _theil_sen_trend(keys: list[str], values: dict[str, float]) -> dict[str, float]:
+    """対数トレンドを Theil–Sen で推定し、各月の水準を返す."""
+    xs = [float(i) for i in range(len(keys))]
+    ys = [math.log(values[k]) for k in keys]
+    slope = theil_sen_slope(xs, ys)
+    intercept = statistics.median([y - slope * x for x, y in zip(xs, ys)])
+    return {k: math.exp(intercept + slope * x) for k, x in zip(keys, xs)}
 
 
 def calibrate_monthly(
@@ -183,18 +301,18 @@ def calibrate_monthly(
     shrinkage: float = DEFAULT_SHRINKAGE,
     today: date | None = None,
     average_market_factor: float = 1.0,
+    average_share_factor: float = 1.0,
 ) -> MonthlyCalibration:
-    """月次実績から base_orders・月次季節係数・推奨aovを推定する.
+    """月次実績から base_sessions・base_cvr・月次季節係数・推奨aovを推定する.
+
+    セッション列があれば「集客」と「転換率」を別々に推定する。
+    この2つは実績で別々に動いており(セッション横ばい、CVR上昇)、
+    1本にまとめるとトレンド推定を誤る。
 
     average_market_factor は二重計上を防ぐための補正。
-
-    月次の注文数には、その月の販促イベント(5のつく日など)による上振れが
-    すでに含まれている。一方モデルは base_orders に市場規模係数を掛けて
-    イベント日の需要を作る。補正しないと、実績に含まれていた上振れを
-    もう一度乗せることになり、ベースライン予測が系統的に過大になる。
-
-    そこで「その月の市場規模係数の平均」で割り、base_orders を
-    「定常施策だけの日(baseline_rate)の注文数」に引き戻す。
+    月次のセッション数には、その月の販促イベントによる上振れがすでに
+    含まれている。一方モデルは base_sessions に市場規模係数を掛けて
+    イベント日の集客を作る。補正しないと上振れを二度乗せることになる。
     """
     notes: list[str] = []
     if len(rows) < 6:
@@ -206,36 +324,38 @@ def calibrate_monthly(
         last = rows[-1]
         if (last.year, last.month) == (today.year, today.month) and last.days is None:
             notes.append(
-                f"最終月({last.key})が当月ですが days 列が空です。"
-                "月全体とみなすため水準を過小評価します。実日数を入れてください"
+                f"最終月({last.key})が当月ですが日数が不明です。"
+                "月全体とみなすため水準を過小評価します"
             )
 
-    # 1. カレンダー構成を除去した日次水準
+    has_sessions = all(r.sessions for r in rows)
+    basis = "sessions" if has_sessions else "orders"
+    if not has_sessions:
+        notes.append(
+            "セッション列がないため、集客と転換率を分離できませんでした。"
+            "base_cvr は仮値のままで、水準はすべて base_sessions に吸収されています"
+        )
+
+    # 1. カレンダー構成(曜日・給料日サイクル)を除いた日次水準
     index: dict[str, float] = {}
     for r in rows:
         weight = _calendar_weight(r.covered_days(), prior)
         if weight <= 0:
             continue
-        index[r.key] = r.orders / weight
+        index[r.key] = (r.sessions if has_sessions else r.orders) / weight
 
     if len(index) < 2:
         raise ValueError("月次校正には最低2ヶ月の実績が必要です")
 
-    # 2. Theil–Sen で対数トレンドを推定(外れ値に強い)
     keys = list(index)
-    xs = [float(i) for i in range(len(keys))]
-    ys = [math.log(index[k]) for k in keys]
-    slope = theil_sen_slope(xs, ys)
-    intercept = statistics.median([y - slope * x for x, y in zip(xs, ys)])
-    trend = {k: math.exp(intercept + slope * x) for k, x in zip(keys, xs)}
+    trend = _theil_sen_trend(keys, index)
 
-    # 3. 残差を季節係数に。1ヶ月=観測1点なので1.0方向へ縮小する。
+    # 2. 残差を季節係数に。1ヶ月=観測1点なので1.0方向へ縮小する。
     seasonal_raw: dict[str, float] = {}
     month_factors = {f"{m:02d}": prior.month.get(f"{m:02d}", 1.0) for m in range(1, 13)}
     observed: dict[str, list[float]] = {}
     for k in keys:
-        mm = k.split("-")[1]
-        observed.setdefault(mm, []).append(index[k] / trend[k])
+        observed.setdefault(k.split("-")[1], []).append(index[k] / trend[k])
     for mm, residuals in observed.items():
         raw = statistics.median(residuals)
         seasonal_raw[mm] = round(raw, 3)
@@ -247,43 +367,65 @@ def calibrate_monthly(
 
     month_factors, scale = _normalize(month_factors)
 
-    # 4. base_orders は直近のトレンド水準 × 正規化で吸収したスケール
-    #    さらに市場規模係数の平均で割り、定常施策だけの日の水準に引き戻す
-    base_orders = trend[keys[-1]] * scale
+    # 3. 水準。販促イベントの上振れを差し引いて定常施策だけの日に引き戻す。
+    level = trend[keys[-1]] * scale
     if average_market_factor and average_market_factor > 0:
-        base_orders /= average_market_factor
+        level /= average_market_factor
         if abs(average_market_factor - 1.0) > 0.01:
             notes.append(
                 f"販促イベントによる上振れ(平均{average_market_factor:.3f}倍)を"
-                "実績から差し引いて base_orders を求めました"
+                "実績から差し引きました"
             )
     else:
         notes.append(
-            "販促スケジュールが未指定のため、base_orders に販促イベントの"
-            "上振れが含まれたままです。ベースライン予測が過大になります"
+            "販促スケジュールが未指定のため、販促イベントの上振れが"
+            "含まれたままです。ベースライン予測が過大になります"
             "(--schedule を指定してください)"
         )
 
+    # 4. 転換率は別系列としてトレンドだけ取る
+    cvr_at: dict[str, float] = {}
+    cvr_trend_at: dict[str, float] = {}
+    if has_sessions:
+        for r in rows:
+            cvr_at[r.key] = round(r.cvr, 5)
+        cvr_trend_at = _theil_sen_trend(list(cvr_at), cvr_at)
+        base_cvr = cvr_trend_at[keys[-1]]
+        # 実績の転換率には、プロモーションパッケージ加入で開く施策による
+        # 上振れがすでに含まれている。モデルはこれをシェア係数で作るため、
+        # 補正しないと同じ効果を二度乗せることになる(集客側と同じ構造)。
+        if average_share_factor and average_share_factor > 0:
+            base_cvr /= average_share_factor
+            if abs(average_share_factor - 1.0) > 0.01:
+                notes.append(
+                    f"参加資格つき施策による転換率の上振れ"
+                    f"(平均{average_share_factor:.3f}倍)を実績から差し引きました"
+                )
+        base_sessions = level
+    else:
+        base_cvr = prior.base_cvr
+        base_sessions = level / base_cvr if base_cvr > 0 else level
+
     # 5. 推奨 aov は直近3ヶ月の中央値(直近の価格帯を反映)
     recent = [r for r in rows if r.gmv > 0][-3:]
-    suggested_aov = (
-        statistics.median([r.gmv / r.orders for r in recent]) if recent else 0.0
-    )
+    suggested_aov = statistics.median([r.aov for r in recent]) if recent else 0.0
     if not recent:
-        notes.append("gmv 列が空のため aov を推定できませんでした")
+        notes.append("売上列が空のため aov を推定できませんでした")
 
-    yoy = f"{rows[0].key}〜{rows[-1].key}"
+    span = f"{rows[0].key}〜{rows[-1].key}"
+    basis_ja = "セッションと転換率を分離して" if has_sessions else "注文数ベースで"
     note = (
-        f"月次実績{len(rows)}ヶ月({yoy})で校正。"
-        f"base_orders と月次季節係数のみ実測。"
-        f"曜日係数・給料日サイクル係数・市場規模とシェアの弾力性・aov_sigma は未校正(仮値)"
+        f"月次実績{len(rows)}ヶ月({span})を{basis_ja}校正。"
+        "base_sessions・base_cvr・月次季節係数のみ実測。"
+        "曜日係数・給料日サイクル係数・市場規模とシェアの弾力性・aov_sigma は未校正(仮値)"
     )
     if notes:
         note += " / " + " / ".join(notes)
 
     params = replace(
         prior,
-        base_orders=round(base_orders, 2),
+        base_sessions=round(base_sessions, 2),
+        base_cvr=round(base_cvr, 5),
         month=month_factors,
         calibration_note=note,
     )
@@ -291,9 +433,12 @@ def calibrate_monthly(
         params=params,
         suggested_aov=round(suggested_aov, 1),
         notes=notes,
+        basis=basis,
         monthly_index={k: round(v, 3) for k, v in index.items()},
         trend_at={k: round(v, 3) for k, v in trend.items()},
         seasonal_raw=seasonal_raw,
+        cvr_at=cvr_at,
+        cvr_trend_at={k: round(v, 5) for k, v in cvr_trend_at.items()},
     )
 
 
@@ -358,7 +503,7 @@ def calibrate_daily(
     )
     return replace(
         prior,
-        base_orders=round(base, 2),
+        base_sessions=round(base / prior.base_cvr, 2) if prior.base_cvr > 0 else base,
         dow=dow,
         dom=dom,
         month=month,

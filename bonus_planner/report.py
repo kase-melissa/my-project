@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import html
 import json
+import statistics
 import unicodedata
 from datetime import date, timedelta
 from pathlib import Path
@@ -126,53 +127,97 @@ def _section_sensitivity(scenarios: list | None) -> list[str]:
 def _section_validation(
     cfg: AppConfig, schedule: PromoSchedule, plan: PlanResult, history: list | None
 ) -> list[str]:
-    """モデルのベースライン予測を前年同月の実績と突き合わせる."""
+    """モデルのベースライン予測を実績と突き合わせる.
+
+    前年同月比ではなく **直近3ヶ月の日次GMV** と比べる。
+    成長が速い事業では前年比が大きく振れるため、閾値による判定に使えない。
+    日次に揃えれば月の日数差も成長トレンドのノイズも受けずに比較できる。
+    """
     if not history:
         return []
     year, month = (int(x) for x in schedule.month.split("-"))
-    last_year = [r for r in history if r.year == year - 1 and r.month == month]
-    if not last_year:
-        return []
-    actual = last_year[0]
 
     # 基準線から対象月ぶんだけを取り出す(月跨ぎ分を除く)
     month_baseline = 0.0
-    for unit, opt in plan.selected:
-        for est in opt.estimates:
+    month_days: set = set()
+
+    def collect(estimates):
+        nonlocal month_baseline
+        for est in estimates:
             if est.day.month == month:
                 month_baseline += est.base_gmv
-    for unit, opt, _r in plan.rejected:
-        for est in opt.estimates:
-            if est.day.month == month:
-                month_baseline += est.base_gmv
+                month_days.add(est.day)
+
+    for _u, opt in plan.selected:
+        collect(opt.estimates)
+    for _u, opt, _r in plan.rejected:
+        collect(opt.estimates)
     for unit in plan.blocked:
         if unit.options:
-            for est in unit.options[0].estimates:
-                if est.day.month == month:
-                    month_baseline += est.base_gmv
+            collect(unit.options[0].estimates)
 
-    L = ["## 8. 前年同月との突き合わせ", ""]
+    if not month_days:
+        return []
+    model_daily = month_baseline / len(month_days)
+
+    recent = [r for r in history if r.gmv > 0][-3:]
+    if not recent:
+        return []
+    actual_daily = statistics.mean(
+        r.gmv / (r.days or r.days_in_month) for r in recent
+    )
+
+    L = ["## 8. 実績との突き合わせ", ""]
     L.append(
         "モデルのベースライン予測が実績とかけ離れていないかの確認。"
         "大きく外れていれば係数かモデルのどちらかが誤っている。"
     )
     L.append("")
-    L.append("| 項目 | 値 |")
+    L.append("| 項目 | 日次GMV |")
     L.append("|---|---:|")
-    L.append(f"| {actual.key} 実績GMV | {_yen(actual.gmv)} |")
-    L.append(f"| {schedule.month} ベースライン予測GMV | {_yen(month_baseline)} |")
-    if actual.gmv > 0:
-        ratio = month_baseline / actual.gmv
-        L.append(f"| 前年比 | {ratio:.2f}倍 |")
-        L.append("")
-        if not 0.7 <= ratio <= 1.5:
-            L.append(
-                f"> **注意**: 前年比が {ratio:.2f} 倍と乖離しています。"
-                "`base_orders` か `aov` の設定を確認してください。"
-            )
-        else:
-            L.append("> 妥当な範囲です。")
+    for r in recent:
+        days = r.days or r.days_in_month
+        L.append(
+            f"| {r.key} 実績（{days}日）| {_yen(r.gmv / days)} |"
+        )
+    L.append(f"| **直近3ヶ月の平均** | **{_yen(actual_daily)}** |")
+    L.append(
+        f"| {schedule.month} ベースライン予測 | {_yen(model_daily)} |"
+    )
+    ratio = model_daily / actual_daily if actual_daily else 0.0
+    L.append(f"| 比率 | {ratio:.2f}倍 |")
     L.append("")
+    if not 0.75 <= ratio <= 1.35:
+        L.append(
+            f"> **注意**: モデルの日次予測が直近実績の {ratio:.2f} 倍と乖離しています。"
+            "`base_sessions`・`base_cvr`・`aov` の設定を確認してください。"
+        )
+    else:
+        L.append("> 妥当な範囲です。")
+    L.append("")
+
+    # 前年同月は参考値として併記する(判定には使わない)
+    last_year = [r for r in history if r.year == year - 1 and r.month == month]
+    if last_year and last_year[0].gmv > 0:
+        ly = last_year[0]
+        ly_days = ly.days or ly.days_in_month
+        L.append(
+            f"参考: {ly.key} の実績は日次 {_yen(ly.gmv / ly_days)}"
+            f"（月計 {_yen(ly.gmv)}）。"
+            f"前年同月比では {month_baseline / ly.gmv:.2f}倍 になる。"
+        )
+        L.append("")
+        if recent and recent[-1].sessions:
+            first = history[0]
+            if first.sessions and first.cvr:
+                L.append(
+                    f"成長の内訳: セッション {first.sessions:,.0f}→{recent[-1].sessions:,.0f}、"
+                    f"転換率 {first.cvr:.1%}→{recent[-1].cvr:.1%}、"
+                    f"平均注文単価 {_yen(first.aov)}→{_yen(recent[-1].aov)}"
+                    f"（{first.key} → {recent[-1].key}）。"
+                    "成長の大半は集客ではなく転換率と単価の改善による。"
+                )
+                L.append("")
     return L
 
 
@@ -212,7 +257,8 @@ def _section_assumptions(cfg: AppConfig, schedule: PromoSchedule, plan: PlanResu
     calibrated = "で校正" in note
     monthly_only = "月次実績" in note
     mark = "**実測で校正済み**" if calibrated else "初期仮値"
-    L.append(f"| 基準注文数 `base_orders` | {mark} |")
+    L.append(f"| 基準セッション数 `base_sessions` | {mark} |")
+    L.append(f"| 基準転換率 `base_cvr` | {mark} |")
     season = mark + (
         "（月次データは1ヶ月=1点のため弱い推定。縮小推定で過学習を抑制）"
         if calibrated and monthly_only else ""

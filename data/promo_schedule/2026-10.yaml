@@ -22,7 +22,7 @@
 month: "2026-10"
 extends_to: "2026-11-01"   # 爆買WEEKが11/1まで続くため計画対象を延長
 source_note: "モール公式 販促イベントカレンダー(2026年10月・貴社内限定)"
-entry_deadline_days_before: 3   # 締切の記載がPDFにないための暫定値
+entry_deadline_days_before: 3   # 個別に entry_deadline を書かない施策の既定値
 
 benefits:
   # ======================================================================
@@ -152,6 +152,7 @@ benefits:
     rate: 0.02
     funding: mall
     eligibility: bonus_store_plus
+    entry_deadline: "2026-09-16"   # 10月分ボーナスストア申込の締切
     min_order_yen: 3000
     user_cap_yen: 5000
     user_cap_period: day
@@ -163,6 +164,7 @@ benefits:
     rate: 0.03
     funding: mall
     eligibility: bonus_store_plus_excellent
+    entry_deadline: "2026-09-16"   # 10月分ボーナスストア申込の締切
     min_order_yen: 3000
     user_cap_yen: 5000
     user_cap_period: day
@@ -178,4 +180,5 @@ notes:
     text: "ポイントアップ+4%は事前告知なし・事前のユーザー訴求NG。バナーやメルマガでの事前訴求を行わないこと"
   - days: [11, 12]
     text: "10/11(日)・10/12(月・スポーツの日)は連休。需要モデルの祝日補正は未実装のため、実績で上振れした場合は月次係数に吸収される"
-  - text: "エントリー締切はPDFに記載がない。判明次第 entry_deadline に記入すること(現在は開催3日前の暫定値)"
+  - text: "10月分のボーナスストア申込締切は2026-09-16。これを過ぎると当月のボーナスストアPlus指定日(10/2・7・16・20・27・28)に参加できない"
+  - text: "平均注文単価5,529円に対し、爆買WEEKの7%段(合計20,000円以上)とモールクーポン(注文下限25,000円)は該当する注文がほぼ無く、実質的に機能しない"

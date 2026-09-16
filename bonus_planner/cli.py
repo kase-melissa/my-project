@@ -14,7 +14,7 @@ from .config import AppConfig
 from .optimizer import OBJECTIVES, optimize
 from .planner import build_entry_units
 from .report import render_html, render_markdown, write_csv, write_json
-from .sensitivity import average_market_factor, run_scenarios
+from .sensitivity import average_baseline_factors, run_scenarios
 from .schedule import load_schedule
 
 DEFAULT_CONFIG = "config/config.yaml"
@@ -45,7 +45,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
     history = None
     if args.history:
-        kind, rows = load_history(args.history)
+        kind, rows = load_history(
+            args.history, today=today, partial_days=args.partial_days
+        )
         if kind == "monthly":
             history = rows
         else:
@@ -72,23 +74,27 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
     cfg = AppConfig.load(args.config, args.behavior)
-    kind, rows = load_history(args.history)
+    kind, rows = load_history(
+        args.history, today=_today(args.today), partial_days=args.partial_days
+    )
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
     if kind == "monthly":
-        avg_market = 1.0
+        avg_market, avg_share = 0.0, 1.0  # 0.0 は未指定を示す
         if args.schedule:
-            avg_market = average_market_factor(cfg, load_schedule(args.schedule))
-            print(
-                f"販促スケジュールから求めた市場規模係数の平均: {avg_market:.3f}倍"
-                "（実績に含まれるイベント上振れを差し引きます）\n"
+            avg_market, avg_share = average_baseline_factors(
+                cfg, load_schedule(args.schedule)
             )
-        else:
-            avg_market = 0.0  # 未指定を示す。calibrate 側で注意を出す
+            print(
+                "実績に含まれる販促イベントの上振れを差し引きます:\n"
+                f"  市場規模係数の平均 {avg_market:.3f}倍（セッション側）\n"
+                f"  シェア係数の平均   {avg_share:.3f}倍（転換率側）\n"
+            )
         result = calibrate_monthly(
             rows, cfg.behavior, shrinkage=args.shrinkage,
             today=_today(args.today), average_market_factor=avg_market,
+            average_share_factor=avg_share,
         )
         params, notes = result.params, result.notes
         _print_monthly_detail(result, rows, cfg)
@@ -125,27 +131,35 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 
 
 def _print_monthly_detail(result, rows, cfg: AppConfig) -> None:
-    print("月次実績と推定内訳:")
+    basis = "セッション" if result.basis == "sessions" else "注文数"
+    print(f"月次実績と推定内訳（水準の基準: {basis}）:")
     print(
-        f"  {'月':<9}{'注文':>8}{'GMV':>14}{'単価':>9}"
-        f"{'暦調整後':>10}{'トレンド':>10}{'季節残差':>10}"
+        f"  {'月':<9}{'注文':>7}{'ｾｯｼｮﾝ':>8}{'CVR':>7}{'単価':>8}{'GMV':>13}"
+        f"{'暦調整後':>10}{'トレンド':>10}{'季節残差':>9}"
     )
     for r in rows:
         idx = result.monthly_index.get(r.key)
         trend = result.trend_at.get(r.key)
-        resid = (idx / trend) if (idx and trend) else None
-        aov = r.gmv / r.orders if r.orders else 0
+        resid = (idx / trend) if (idx and trend) else 0.0
+        sess = r.sessions or 0
+        cvr = r.cvr
         partial = " *" if r.is_partial else ""
         print(
-            f"  {r.key:<9}{r.orders:>8,.0f}{r.gmv:>14,.0f}{aov:>9,.0f}"
-            f"{(idx or 0):>10.2f}{(trend or 0):>10.2f}"
-            f"{(resid if resid else 0):>10.3f}{partial}"
+            f"  {r.key:<9}{r.orders:>7,.0f}{sess:>8,.0f}"
+            f"{(f'{cvr:.1%}' if cvr else '-'):>7}{r.aov:>8,.0f}{r.gmv:>13,.0f}"
+            f"{(idx or 0):>10.2f}{(trend or 0):>10.2f}{resid:>9.3f}{partial}"
         )
-    print("  * は部分月（days 指定あり）")
+    print("  * は部分月（実日数で按分）")
     print(
         "\n  「暦調整後」は曜日構成と給料日サイクルの偏りを除いた日次水準。"
         "\n  「季節残差」はトレンドからの乖離で、これを縮小して季節係数にしている。"
     )
+    if result.cvr_trend_at:
+        first, last = list(result.cvr_trend_at)[0], list(result.cvr_trend_at)[-1]
+        print(
+            f"\n  転換率のトレンド: {result.cvr_trend_at[first]:.2%} → "
+            f"{result.cvr_trend_at[last]:.2%}（{first} → {last}）"
+        )
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -218,6 +232,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="月次実績CSV. 指定すると前年同月とベースライン予測を突き合わせる",
     )
     sp.add_argument(
+        "--partial-days", type=int, default=None,
+        help="実績CSVの最終月の実日数. 省略時は --today から推定(前日まで)",
+    )
+    sp.add_argument(
         "--no-sensitivity", action="store_true",
         help="前提の感応度分析を省略する(高速化)",
     )
@@ -234,6 +252,10 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument(
         "--suggest-store", default="config/store_suggested.yaml",
         help="推奨 aov の出力先",
+    )
+    sc.add_argument(
+        "--partial-days", type=int, default=None,
+        help="最終月の実日数. 省略時は --today から推定(前日まで)",
     )
     sc.add_argument(
         "--shrinkage", type=float, default=0.5,

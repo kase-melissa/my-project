@@ -86,20 +86,42 @@ def fragile_days(scenarios: list[Scenario]) -> set[date]:
     return union - robust_days(scenarios)
 
 
-def average_market_factor(cfg: AppConfig, schedule: PromoSchedule) -> float:
-    """その月の市場規模係数の平均.
+def average_baseline_factors(
+    cfg: AppConfig, schedule: PromoSchedule
+) -> tuple[float, float]:
+    """その月の市場規模係数とシェア係数の平均.
 
-    月次実績には販促イベントによる上振れがすでに含まれている。
-    この平均で割ることで base_orders を「定常施策だけの日」の水準に戻す。
+    実績の月次データには、販促イベントによる上振れがすでに含まれている。
+
+      セッション … 全ストア対象の施策(5のつく日など)で押し上げられている
+      転換率     … プロモーションパッケージ加入で開く施策で押し上げられている
+
+    一方モデルは base_sessions に市場規模係数を、base_cvr にシェア係数を掛けて
+    その上振れを作る。補正しないと同じ効果を二度乗せることになり、
+    ベースライン予測が系統的に過大になる。
+
+    シェア側は「過去にボーナスストアPlusには参加していなかった」前提で計算する。
+    実際に参加していた月があれば、その分だけ補正が足りず過大評価が残る。
+
+    戻り値: (市場規模係数の平均, シェア係数の平均)
     """
     from .behavior import DemandModel, build_day_context
     from .economics import rate_by_scope
 
     model = DemandModel(cfg.behavior, cfg.store)
     part = cfg.store.participation(bonus_store_plus=False)
-    factors = []
+    market: list[float] = []
+    share: list[float] = []
     for day in schedule.days():
         ctx = build_day_context(schedule, day)
-        mall_wide, _gated = rate_by_scope(ctx.benefits, part, cfg.store)
-        factors.append(model.market_factor(mall_wide))
-    return sum(factors) / len(factors) if factors else 1.0
+        mall_wide, gated = rate_by_scope(ctx.benefits, part, cfg.store)
+        market.append(model.market_factor(mall_wide))
+        share.append(model.share_factor(gated))
+    if not market:
+        return 1.0, 1.0
+    return sum(market) / len(market), sum(share) / len(share)
+
+
+def average_market_factor(cfg: AppConfig, schedule: PromoSchedule) -> float:
+    """市場規模係数の平均だけを返す薄いラッパ."""
+    return average_baseline_factors(cfg, schedule)[0]

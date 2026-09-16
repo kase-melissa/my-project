@@ -74,21 +74,11 @@ def estimate_day(
     mall_wide, base_gated = model.scoped_rates(ctx, base_part)
     _, entry_gated = model.scoped_rates(ctx, entry_part)
 
-    scale = (
-        cfg.behavior.base_orders
-        * model.calendar_factor(ctx)
-        * model.market_factor(mall_wide)
-    )
-    base_orders = (
-        scale
-        * model.traffic_multiplier(ctx, base_part)
-        * model.share_factor(base_gated)
-    )
-    entry_orders = (
-        scale
-        * model.traffic_multiplier(ctx, entry_part)
-        * model.share_factor(entry_gated + own_effective)
-    )
+    # 参加してもセッション数は変わらない(モール全体の集客は同じ)。
+    # 変わるのは転換率。
+    sessions = model.sessions(ctx, base_part)
+    base_orders = sessions * model.cvr(ctx, base_part)
+    entry_orders = sessions * model.cvr(ctx, entry_part, own_effective)
 
     aov = store.aov
     base_gmv = base_orders * aov

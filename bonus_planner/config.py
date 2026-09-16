@@ -88,7 +88,13 @@ class BehaviorParams:
     基準1.0として、付与率が上がったぶんだけ注文が増える形にしている。
     """
 
-    base_orders: float = 42.0
+    # 需要は「集客 × 転換率」に分解して持つ。
+    # 実績では、成長の大半がセッション増ではなく転換率と単価の改善だった
+    # (2025-09 → 2026-08 でセッション +16%、CVR +23%)。
+    # 1本にまとめるとこの構造が潰れ、前方予測を誤る。
+    base_sessions: float = 220.0   # 定常施策だけの日の1日あたりセッション数
+    base_cvr: float = 0.10         # 基準転換率(注文数 / セッション)
+
     dow: dict[str, float] = field(default_factory=lambda: {
         "mon": 0.95, "tue": 0.92, "wed": 0.95, "thu": 0.95,
         "fri": 1.00, "sat": 1.08, "sun": 1.18,
@@ -132,9 +138,16 @@ class BehaviorParams:
         params.validate()
         return params
 
+    @property
+    def base_orders(self) -> float:
+        """定常施策だけの日の1日あたり注文数. 集客と転換率の積."""
+        return self.base_sessions * self.base_cvr
+
     def validate(self) -> None:
-        if self.base_orders <= 0:
-            raise ValueError("base_orders は正の数である必要があります")
+        if self.base_sessions <= 0:
+            raise ValueError("base_sessions は正の数である必要があります")
+        if not 0 < self.base_cvr <= 1:
+            raise ValueError("base_cvr は0より大きく1以下である必要があります")
         if self.baseline_rate <= 0:
             raise ValueError("baseline_rate は正の数である必要があります")
         if not 0 < self.market_elasticity <= 1:

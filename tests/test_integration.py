@@ -185,7 +185,7 @@ class TestReport(unittest.TestCase):
         self.assertNotIn("rate_elasticity", self.md)
 
     def test_calibration_status_reflects_calibrated_model(self):
-        """校正済みモデルでは base_orders が「校正済み」と表示されること."""
+        """校正済みモデルでは集客・転換率が「校正済み」と表示されること."""
         from dataclasses import replace
 
         from bonus_planner.config import AppConfig as _AppConfig
@@ -198,7 +198,8 @@ class TestReport(unittest.TestCase):
             ),
         )
         md = render_markdown(calibrated, self.schedule, self.plan)
-        self.assertIn("| 基準注文数 `base_orders` | **実測で校正済み** |", md)
+        self.assertIn("| 基準セッション数 `base_sessions` | **実測で校正済み** |", md)
+        self.assertIn("| 基準転換率 `base_cvr` | **実測で校正済み** |", md)
         self.assertIn("| 曜日係数 | **初期仮値**", md)
 
     def test_states_funding_assumption(self):
